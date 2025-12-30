@@ -101,4 +101,16 @@ module.exports = async (m, sock) => {
         footer: 'CLOUD AI Music Center | Professional Quality',
         buttons: [
           { id: 'btn_music_play_again', text: '🔄 Play Another' },
-          { id: 'btn
+          { id: 'btn_music_search', text: '🔍 Search More' },
+          { id: 'btn_music_done', text: '✅ Done' }
+        ]
+      });
+      
+    } catch (error) {
+      console.error('❌ Music Player Error:', error);
+      m.reply(`❌ *Music Processing Error*\n\n` +
+        `⚠️ **Error:** ${error.message}\n\n` +
+        `_Please try a different song or try again later._`);
+    }
+  }
+};
