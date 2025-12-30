@@ -146,6 +146,42 @@ class BotRunner {
                 if (!m.message) return;
                 
                 const body = this.extractMessageText(m.message);
+                
+                // DEBUG: Log message structure
+                console.log('📥 Message received from:', m.sender.substring(0, 8));
+                console.log('📦 Message type:', Object.keys(m.message || {})[0]);
+                
+                // Check for button responses FIRST (this is the key fix)
+                if (m.message.buttonsResponseMessage) {
+                    const buttonId = m.message.buttonsResponseMessage.selectedButtonId;
+                    console.log(`🎯 Button clicked detected: ${buttonId}`);
+                    if (buttonId) {
+                        await this.handleButtonClick(m, socket, buttonId);
+                        return;
+                    }
+                }
+                
+                // Check for list responses
+                if (m.message.listResponseMessage) {
+                    const buttonId = m.message.listResponseMessage.selectedRowId;
+                    console.log(`📋 List button clicked: ${buttonId}`);
+                    if (buttonId) {
+                        await this.handleButtonClick(m, socket, buttonId);
+                        return;
+                    }
+                }
+                
+                // Check for template button responses
+                if (m.message.templateButtonReplyMessage) {
+                    const buttonId = m.message.templateButtonReplyMessage.selectedId;
+                    console.log(`🔘 Template button clicked: ${buttonId}`);
+                    if (buttonId) {
+                        await this.handleButtonClick(m, socket, buttonId);
+                        return;
+                    }
+                }
+                
+                // Only process text messages after checking for buttons
                 if (!body) return;
                 
                 m.body = body;
@@ -159,8 +195,9 @@ class BotRunner {
                     return;
                 }
                 
-                // Check for button clicks
+                // Check for legacy button clicks (text format)
                 if (body.startsWith('btn_')) {
+                    console.log(`🔤 Legacy button text: ${body}`);
                     await this.handleButtonClick(m, socket, body);
                     return;
                 }
@@ -222,40 +259,78 @@ class BotRunner {
     }
 
     async handleButtonClick(m, sock, buttonId) {
-        console.log(`🎯 Button clicked: ${buttonId} by ${m.sender.substring(0, 8)}...`);
+        console.log(`🎯 Processing button click: ${buttonId} by ${m.sender.substring(0, 8)}...`);
+        
+        // Normalize button ID (remove prefixes if needed)
+        let normalizedId = buttonId;
+        if (!buttonId.startsWith('btn_')) {
+            normalizedId = `btn_${buttonId}`;
+        }
+        
+        console.log(`🆔 Normalized button ID: ${normalizedId}`);
+        
+        // Send acknowledgement reaction
+        await m.React('✅').catch(() => {});
         
         // ==================== CORE BUTTONS ====================
-        if (buttonId === 'btn_ping') {
+        if (normalizedId === 'btn_ping' || buttonId === 'ping') {
             const start = Date.now();
-            await m.reply(`🏓 Pong!`);
+            const pingMsg = await m.reply(`🏓 Testing latency...`);
             const latency = Date.now() - start;
-            await sock.sendMessage(m.from, { 
-                text: `⚡ *CLOUD AI Performance*\n\n⏱️ Latency: ${latency}ms\n🆔 Session: ${this.sessionId}\n📊 Status: Optimal` 
-            });
+            
+            // Get bot ping from WebSocket
+            const wsPing = sock.ws?.ping || 'N/A';
+            
+            const status = `⚡ *CLOUD AI Performance Report*\n\n` +
+                          `⏱️ Response Time: ${latency}ms\n` +
+                          `📡 WebSocket Ping: ${wsPing}ms\n` +
+                          `🆔 Session: ${this.sessionId}\n` +
+                          `📊 Status: ${latency < 500 ? 'Optimal ⚡' : 'Normal 📈'}\n` +
+                          `🌐 Connection: ${this.connectionState}\n\n` +
+                          `_${new Date().toLocaleTimeString()}_`;
+            
+            await sock.sendMessage(m.from, { text: status }, { quoted: m });
             return;
         }
         
-        if (buttonId === 'btn_status') {
+        if (normalizedId === 'btn_status' || buttonId === 'status') {
             const uptime = this.getUptime();
+            const memoryUsage = (process.memoryUsage().heapUsed / 1024 / 1024).toFixed(2);
             const status = `📊 *CLOUD AI System Status*\n\n` +
                           `• Session: ${this.sessionId}\n` +
                           `• State: ${this.connectionState}\n` +
                           `• Uptime: ${uptime}\n` +
                           `• Reconnects: ${this.reconnectAttempts}/${this.maxReconnectAttempts}\n` +
                           `• Last Activity: ${this.lastActivity.toLocaleTimeString()}\n` +
-                          `• Memory: ${(process.memoryUsage().heapUsed / 1024 / 1024).toFixed(2)} MB`;
+                          `• Memory: ${memoryUsage} MB\n` +
+                          `• Plugins: ${pluginLoader.plugins.size} loaded`;
             await m.reply(status);
             return;
         }
         
-        if (buttonId === 'btn_plugins') {
+        if (normalizedId === 'btn_plugins' || buttonId === 'plugins') {
             const plugins = Array.from(pluginLoader.plugins.keys());
-            await m.reply(`📦 *Loaded Plugins (${plugins.length})*\n\n${plugins.map(p => `• .${p}`).join('\n')}`);
+            const pluginList = plugins.length > 0 
+                ? plugins.map(p => `• .${p}`).join('\n')
+                : 'No plugins loaded';
+            await m.reply(`📦 *Loaded Plugins (${plugins.length})*\n\n${pluginList}`);
+            return;
+        }
+        
+        if (normalizedId === 'btn_menu' || buttonId === 'menu') {
+            // Trigger the menu command
+            const menuPlugin = pluginLoader.plugins.get('menu');
+            if (menuPlugin) {
+                m.body = '.menu';
+                await menuPlugin(m, sock);
+            } else {
+                await m.reply('❌ Menu plugin not found.');
+            }
             return;
         }
         
         // ==================== OWNER BUTTONS ====================
-        if (buttonId === 'btn_owner' || buttonId === 'btn_core_owner') {
+        if (normalizedId === 'btn_owner' || normalizedId === 'btn_core_owner' || buttonId === 'owner') {
             await sendInteractiveMessage(sock, m.from, {
                 title: '👑 BERA TECH Contact Suite',
                 text: 'Select contact method:',
@@ -295,7 +370,7 @@ class BotRunner {
         }
         
         // ==================== VCF BUTTONS ====================
-        if (buttonId === 'btn_vcf' || buttonId === 'btn_tools_vcf') {
+        if (normalizedId === 'btn_vcf' || normalizedId === 'btn_tools_vcf' || buttonId === 'vcf') {
             if (!m.isGroup) {
                 await m.reply('❌ VCF export only works in groups. Please use this command in a group.');
                 return;
@@ -320,7 +395,7 @@ class BotRunner {
             return;
         }
         
-        if (buttonId === 'btn_vcf_all') {
+        if (normalizedId === 'btn_vcf_all') {
             if (!m.vcfData) {
                 await m.reply('❌ Please run .vcf command first.');
                 return;
@@ -329,7 +404,7 @@ class BotRunner {
             return;
         }
         
-        if (buttonId === 'btn_vcf_admins') {
+        if (normalizedId === 'btn_vcf_admins') {
             if (!m.vcfData) {
                 await m.reply('❌ Please run .vcf command first.');
                 return;
@@ -339,7 +414,7 @@ class BotRunner {
         }
         
         // ==================== TAGALL BUTTONS ====================
-        if (buttonId === 'btn_tagall' || buttonId === 'btn_group_tagall') {
+        if (normalizedId === 'btn_tagall' || normalizedId === 'btn_group_tagall' || buttonId === 'tagall') {
             if (!m.isGroup) {
                 await m.reply('❌ Tagall only works in groups.');
                 return;
@@ -371,7 +446,7 @@ class BotRunner {
             return;
         }
         
-        if (buttonId === 'btn_tag_all') {
+        if (normalizedId === 'btn_tag_all') {
             if (!m.tagallData) {
                 await m.reply('❌ Please run .tagall command first.');
                 return;
@@ -380,7 +455,7 @@ class BotRunner {
             return;
         }
         
-        if (buttonId === 'btn_tag_admins') {
+        if (normalizedId === 'btn_tag_admins') {
             if (!m.tagallData) {
                 await m.reply('❌ Please run .tagall command first.');
                 return;
@@ -389,7 +464,7 @@ class BotRunner {
             return;
         }
         
-        if (buttonId === 'btn_tag_custom') {
+        if (normalizedId === 'btn_tag_custom') {
             if (!m.tagallData) {
                 await m.reply('❌ Please run .tagall command first.');
                 return;
@@ -403,7 +478,7 @@ class BotRunner {
         }
         
         // ==================== MUSIC BUTTONS ====================
-        if (buttonId === 'btn_play' || buttonId === 'btn_music_play') {
+        if (normalizedId === 'btn_play' || normalizedId === 'btn_music_play' || buttonId === 'play') {
             await sendButtons(sock, m.from, {
                 title: '🎵 Music Center',
                 text: 'Search for music or browse categories:',
@@ -418,19 +493,19 @@ class BotRunner {
             return;
         }
         
-        if (buttonId === 'btn_music_search') {
+        if (normalizedId === 'btn_music_search') {
             await m.reply('🎵 Please type: `.play song name` to search for music');
             return;
         }
         
         // ==================== URL/UPLOAD BUTTONS ====================
-        if (buttonId === 'btn_url') {
+        if (normalizedId === 'btn_url' || buttonId === 'url') {
             await m.reply('📁 Reply to any media (image/video/audio) with `.url` to upload it');
             return;
         }
         
         // ==================== PRIVACY BUTTONS ====================
-        if (buttonId.startsWith('btn_priv_')) {
+        if (normalizedId.startsWith('btn_priv_')) {
             const userId = m.sender.split('@')[0];
             const ownerNumbers = ['254116763755', '254743982206'];
             
@@ -439,23 +514,23 @@ class BotRunner {
                 return;
             }
             
-            if (buttonId === 'btn_priv_lastseen') {
+            if (normalizedId === 'btn_priv_lastseen') {
                 await this.showPrivacyOptions(m, sock, 'lastseen');
-            } else if (buttonId === 'btn_priv_profile') {
+            } else if (normalizedId === 'btn_priv_profile') {
                 await this.showPrivacyOptions(m, sock, 'profile');
-            } else if (buttonId === 'btn_priv_status') {
+            } else if (normalizedId === 'btn_priv_status') {
                 await this.showPrivacyOptions(m, sock, 'status');
-            } else if (buttonId === 'btn_priv_groupadd') {
+            } else if (normalizedId === 'btn_priv_groupadd') {
                 await this.showPrivacyOptions(m, sock, 'groupadd');
-            } else if (buttonId === 'btn_priv_disappear') {
+            } else if (normalizedId === 'btn_priv_disappear') {
                 await this.showPrivacyOptions(m, sock, 'disappear');
             }
             return;
         }
         
         // ==================== PRIVACY SETTING BUTTONS ====================
-        if (buttonId.startsWith('btn_priv_set_')) {
-            const parts = buttonId.split('_');
+        if (normalizedId.startsWith('btn_priv_set_')) {
+            const parts = normalizedId.split('_');
             const settingType = parts[3];
             const value = parts[4];
             
@@ -471,8 +546,14 @@ class BotRunner {
             return;
         }
         
+        // ==================== CANCEL BUTTONS ====================
+        if (normalizedId.includes('cancel') || normalizedId.includes('done')) {
+            await m.reply('✅ Operation completed.');
+            return;
+        }
+        
         // ==================== DEFAULT ====================
-        await m.reply(`❌ Button action "${buttonId}" not implemented yet.`);
+        await m.reply(`❌ Button action "${buttonId}" not implemented yet.\n\nTry using commands instead:\n• .ping\n• .menu\n• .owner`);
     }
 
     // ==================== VCF EXPORT FUNCTION ====================
@@ -669,6 +750,8 @@ class BotRunner {
         if (message.extendedTextMessage?.text) return message.extendedTextMessage.text;
         if (message.imageMessage?.caption) return message.imageMessage.caption;
         if (message.videoMessage?.caption) return message.videoMessage.caption;
+        if (message.buttonsResponseMessage?.selectedButtonId) return null; // Don't extract text from buttons
+        if (message.listResponseMessage?.selectedRowId) return null; // Don't extract text from list buttons
         return '';
     }
 
