@@ -1,10 +1,16 @@
 const path = require('path');
 const pino = require('pino');
-const { makeWASocket, fetchLatestBaileysVersion, DisconnectReason, jidDecode } = require('@whiskeysockets/baileys');
+const { makeWASocket, fetchLatestBaileysVersion, DisconnectReason, jidDecode, downloadMediaMessage } = require('@whiskeysockets/baileys');
 const NodeCache = require('node-cache');
 const database = require('./database');
 const pluginLoader = require('./plugin-loader');
-const { sendButtons } = require('gifted-btns');
+const { sendButtons, sendInteractiveMessage } = require('gifted-btns');
+const fs = require('fs').promises;
+const fetch = require('node-fetch');
+const FormData = require('form-data');
+const { fileTypeFromBuffer } = require('file-type');
+const axios = require('axios');
+const yts = require('yt-search');
 
 class BotRunner {
     constructor(sessionId, authState) {
@@ -19,7 +25,7 @@ class BotRunner {
         
         this.connectionState = 'disconnected';
         this.lastActivity = new Date();
-        this.userStates = new Map(); // Store user-specific states for multi-step commands
+        this.userStates = new Map();
     }
 
     async start() {
@@ -32,7 +38,6 @@ class BotRunner {
             this.connectionState = 'connecting';
             console.log(`🤖 Starting CLOUD AI bot for session: ${this.sessionId}`);
             
-            // Load session from DB if available
             if (!this.authState.creds && database.isConnected) {
                 const savedSession = await database.getSession(this.sessionId);
                 if (savedSession) {
@@ -49,7 +54,7 @@ class BotRunner {
                 printQRInTerminal: false,
                 browser: ["CLOUD AI", "safari", "3.3"],
                 auth: this.authState,
-                getMessage: async () => ({ conversation: "CLOUD AI WhatsApp User Bot" }),
+                getMessage: async () => undefined,
                 msgRetryCounterCache: this.msgRetryCounterCache,
                 connectTimeoutMs: 30000,
                 keepAliveIntervalMs: 15000,
@@ -57,7 +62,6 @@ class BotRunner {
                 defaultQueryTimeoutMs: 0
             });
 
-            // Store in global active bots
             global.activeBots = global.activeBots || {};
             global.activeBots[this.sessionId] = {
                 socket: this.socket,
@@ -66,7 +70,6 @@ class BotRunner {
                 instance: this
             };
 
-            // Setup event handlers
             this.setupEventHandlers();
             
             this.isRunning = true;
@@ -74,7 +77,6 @@ class BotRunner {
             
             console.log(`✅ CLOUD AI bot started successfully for session: ${this.sessionId}`);
             
-            // Send welcome message
             this.sendWelcomeMessage().catch(console.error);
             
             return this.socket;
@@ -89,7 +91,6 @@ class BotRunner {
     setupEventHandlers() {
         const { socket } = this;
         
-        // Save credentials to MongoDB when updated
         socket.ev.on('creds.update', async (creds) => {
             try {
                 if (database.isConnected) {
@@ -101,7 +102,6 @@ class BotRunner {
             }
         });
 
-        // Connection update handler
         socket.ev.on('connection.update', async (update) => {
             const { connection, lastDisconnect } = update;
             
@@ -111,7 +111,6 @@ class BotRunner {
                 console.log(`✅ CLOUD AI bot ${this.sessionId} connected successfully!`);
                 this.reconnectAttempts = 0;
                 
-                // Save session to MongoDB on successful connection
                 if (database.isConnected) {
                     await database.saveSession(this.sessionId, this.authState);
                 }
@@ -139,7 +138,6 @@ class BotRunner {
             }
         });
 
-        // Message handler with button support
         socket.ev.on("messages.upsert", async (chatUpdate) => {
             try {
                 this.lastActivity = new Date();
@@ -161,7 +159,7 @@ class BotRunner {
                     return;
                 }
                 
-                // Check for button clicks (starts with 'btn_')
+                // Check for button clicks
                 if (body.startsWith('btn_')) {
                     await this.handleButtonClick(m, socket, body);
                     return;
@@ -179,16 +177,14 @@ class BotRunner {
                     
                     console.log(`Command: ${prefix}${cmd} from ${m.sender.substring(0, 8)}...`);
                     
-                    // Try to execute as plugin first
+                    // Execute plugin
                     const pluginResult = await pluginLoader.executePlugin(cmd, m, socket);
                     
                     if (!pluginResult.success) {
-                        // If no plugin found, use built-in commands
                         await this.handleBuiltinCommand(m, socket, cmd, args);
                     }
                 }
                 
-                // Auto-reaction
                 if (!m.key.fromMe && m.message && process.env.AUTO_REACT === 'true') {
                     this.sendAutoReaction(m, socket).catch(() => {});
                 }
@@ -204,7 +200,6 @@ class BotRunner {
         
         switch(userState.waitingFor) {
             case 'customTagMessage':
-                // Handle custom tag message from tagall plugin
                 const participants = userState.data?.participants;
                 if (participants) {
                     const customMessage = m.body;
@@ -221,279 +216,273 @@ class BotRunner {
                         mentions: mentions
                     }, { quoted: m });
                 }
-                
-                this.userStates.delete(userId);
-                break;
-                
-            case 'privacyValue':
-                // Handle privacy value selection
-                const settingType = userState.data?.settingType;
-                if (settingType) {
-                    await this.applyPrivacySetting(m, sock, settingType, m.body);
-                }
                 this.userStates.delete(userId);
                 break;
         }
     }
 
     async handleButtonClick(m, sock, buttonId) {
-        console.log(`Button clicked: ${buttonId} by ${m.sender.substring(0, 8)}...`);
+        console.log(`🎯 Button clicked: ${buttonId} by ${m.sender.substring(0, 8)}...`);
         
-        // Core menu buttons
-        const coreButtons = {
-            'btn_menu': async () => {
-                const menuPlugin = pluginLoader.plugins.get('menu');
-                if (menuPlugin) await menuPlugin(m, sock);
-            },
-            'btn_ping': async () => {
-                const start = Date.now();
-                await m.reply(`🏓 Pong!`);
-                const latency = Date.now() - start;
-                await sock.sendMessage(m.from, { text: `⏱️ Latency: ${latency}ms\n🆔 ${this.sessionId}` });
-            },
-            'btn_owner': async () => {
-                const ownerPlugin = pluginLoader.plugins.get('owner');
-                if (ownerPlugin) await ownerPlugin(m, sock);
-            },
-            'btn_play': async () => {
-                await m.reply('🎵 Use `.play song name` to play music');
-            },
-            'btn_status': async () => {
-                const uptime = this.getUptime();
-                const status = `☁️ *CLOUD AI Status*\n\n` +
-                              `• Session: ${this.sessionId}\n` +
-                              `• State: ${this.connectionState}\n` +
-                              `• Uptime: ${uptime}\n` +
-                              `• Reconnects: ${this.reconnectAttempts}/${this.maxReconnectAttempts}\n` +
-                              `• Last Activity: ${this.lastActivity.toLocaleTimeString()}`;
-                await m.reply(status);
-            },
-            'btn_plugins': async () => {
-                const plugins = Array.from(pluginLoader.plugins.keys());
-                await m.reply(`📦 Loaded Plugins (${plugins.length}):\n${plugins.map(p => `• .${p}`).join('\n')}`);
-            },
-            'btn_contact_call': async () => {
-                await m.reply(`📞 Call BERA TECH:\nPrimary: 254116763755\nSecondary: 254743982206`);
-            },
-            'btn_contact_email': async () => {
-                await m.reply(`✉️ Email: beratech00@gmail.com\n\nFor support and inquiries.`);
-            },
-            'btn_contact_support': async () => {
-                await m.reply(`💬 Support: https://t.me/beratech\nGitHub: https://github.com/beratech/cloud-ai`);
-            }
-        };
-
-        // VCF Plugin buttons
-        const vcfButtons = {
-            'btn_vcf_all': async () => {
-                const vcfPlugin = pluginLoader.plugins.get('vcf');
-                if (vcfPlugin) {
-                    await this.handleVCFExport(m, sock, 'all');
-                }
-            },
-            'btn_vcf_admins': async () => {
-                const vcfPlugin = pluginLoader.plugins.get('vcf');
-                if (vcfPlugin) {
-                    await this.handleVCFExport(m, sock, 'admins');
-                }
-            },
-            'btn_vcf_cancel': async () => {
-                await m.reply('✅ VCF export cancelled.');
-            }
-        };
-
-        // View Plugin buttons
-        const viewButtons = {
-            'btn_view_info': async () => {
-                await this.showMessageInfo(m, sock);
-            },
-            'btn_view_info_full': async () => {
-                if (m.mediaData) {
-                    await this.showFullMediaInfo(m, sock, m.mediaData);
-                }
-            },
-            'btn_view_help': async () => {
-                await m.reply(`*👁️ View Command Help*\n\nUsage:\n• Reply to any media message with .view\n• View message information\n• Download media files\n\nOwner: BERA TECH`);
-            },
-            'btn_view_back': async () => {
-                await m.reply('Returning to main menu...');
-            },
-            'btn_view_cancel': async () => {
-                await m.reply('✅ Operation cancelled.');
-            }
-        };
-
-        // Media download buttons
-        const mediaDownloadButtons = {
-            'btn_view_download_image': async () => {
-                if (m.mediaData) await this.downloadMedia(m, sock, m.mediaData);
-            },
-            'btn_view_download_video': async () => {
-                if (m.mediaData) await this.downloadMedia(m, sock, m.mediaData);
-            },
-            'btn_view_download_audio': async () => {
-                if (m.mediaData) await this.downloadMedia(m, sock, m.mediaData);
-            },
-            'btn_view_download_document': async () => {
-                if (m.mediaData) await this.downloadMedia(m, sock, m.mediaData);
-            }
-        };
-
-        // URL Plugin buttons
-        const urlButtons = {
-            'btn_url_help': async () => {
-                await m.reply(`*🔗 URL Uploader Help*\n\nUsage:\n1. Reply to any media (image/video/audio)\n2. Use .url command\n3. Select upload service\n4. Get direct URL\n\nSupported: Images, Videos, Audio\nMax Size: 50MB\n\nPowered by CLOUD AI`);
-            },
-            'btn_url_example': async () => {
-                await m.reply('*📋 Example:*\n1. Send or forward an image\n2. Reply to it with `.url`\n3. Select upload service\n4. Get direct link to share');
-            },
-            'btn_url_tmpfiles': async () => {
-                if (m.uploadData) {
-                    await this.uploadToService(m, sock, m.uploadData.quotedMsg, 'tmpfiles');
-                }
-            },
-            'btn_url_catbox': async () => {
-                if (m.uploadData) {
-                    await this.uploadToService(m, sock, m.uploadData.quotedMsg, 'catbox');
-                }
-            },
-            'btn_url_cancel': async () => {
-                await m.reply('✅ Upload cancelled.');
-            },
-            'btn_url_copy': async () => {
-                // URL would be in m.data or we need to store it
-                await m.reply('📋 Copy the URL from the message above.');
-            },
-            'btn_url_new': async () => {
-                await m.reply('🔄 Send .url again with a new media file.');
-            },
-            'btn_url_done': async () => {
-                await m.reply('✅ URL operation completed.');
-            }
-        };
-
-        // TagAll Plugin buttons
-        const tagallButtons = {
-            'btn_tag_all': async () => {
-                if (m.tagData) {
-                    await this.tagEveryone(m, sock, m.tagData.participants, '👥 *Everyone!*');
-                }
-            },
-            'btn_tag_admins': async () => {
-                if (m.tagData) {
-                    const admins = m.tagData.participants.filter(p => p.admin);
-                    await this.tagEveryone(m, sock, admins, '👑 *Admins!*');
-                }
-            },
-            'btn_tag_custom': async () => {
-                if (m.tagData) {
-                    await this.requestCustomTagMessage(m, sock, m.tagData.participants);
-                }
-            },
-            'btn_tag_cancel': async () => {
-                await m.reply('✅ Tagging cancelled.');
-            },
-            'btn_tag_default': async () => {
-                if (m.tagData) {
-                    await this.tagEveryone(m, sock, m.tagData.participants, '👥 *Attention everyone!*');
-                }
-            }
-        };
-
-        // Privacy Plugin buttons
-        const privacyButtons = {
-            'btn_priv_lastseen': async () => {
-                await this.showPrivacyOptions(m, sock, 'lastseen', ['all', 'contacts', 'none'], ['👁️ Everyone', '📱 Contacts', '🙈 Nobody']);
-            },
-            'btn_priv_profile': async () => {
-                await this.showPrivacyOptions(m, sock, 'profile', ['all', 'contacts', 'none'], ['👁️ Everyone', '📱 Contacts', '🙈 Nobody']);
-            },
-            'btn_priv_status': async () => {
-                await this.showPrivacyOptions(m, sock, 'status', ['all', 'contacts', 'none'], ['👁️ Everyone', '📱 Contacts', '🙈 Nobody']);
-            },
-            'btn_priv_groupadd': async () => {
-                await this.showPrivacyOptions(m, sock, 'groupadd', ['all', 'contacts', 'none'], ['👁️ Everyone', '📱 Contacts', '🙈 Nobody']);
-            },
-            'btn_priv_disappear': async () => {
-                const { WA_DEFAULT_EPHEMERAL } = require('@whiskeysockets/baileys');
-                await this.showPrivacyOptions(m, sock, 'disappear', [0, WA_DEFAULT_EPHEMERAL, 86400, 604800], ['❌ Off', '⏰ 24h', '📅 7d', '♾️ 90d']);
-            },
-            'btn_priv_cancel': async () => {
-                await m.reply('✅ Privacy settings cancelled.');
-            },
-            'btn_priv_back': async () => {
-                const privacyPlugin = pluginLoader.plugins.get('setprivacy');
-                if (privacyPlugin) await privacyPlugin(m, sock);
-            },
-            'btn_priv_more': async () => {
-                const privacyPlugin = pluginLoader.plugins.get('setprivacy');
-                if (privacyPlugin) await privacyPlugin(m, sock);
-            },
-            'btn_priv_done': async () => {
-                await m.reply('✅ Privacy settings updated.');
-            }
-        };
-
-        // Privacy setting application buttons
-        const privacySettingButtons = {};
-        ['lastseen', 'profile', 'status', 'groupadd', 'disappear'].forEach(setting => {
-            privacySettingButtons[`btn_priv_set_${setting}_all`] = async () => {
-                await this.applyPrivacySetting(m, sock, setting, 'all');
-            };
-            privacySettingButtons[`btn_priv_set_${setting}_contacts`] = async () => {
-                await this.applyPrivacySetting(m, sock, setting, 'contacts');
-            };
-            privacySettingButtons[`btn_priv_set_${setting}_none`] = async () => {
-                await this.applyPrivacySetting(m, sock, setting, 'none');
-            };
-            privacySettingButtons[`btn_priv_set_disappear_0`] = async () => {
-                await this.applyPrivacySetting(m, sock, 'disappear', 0);
-            };
-            privacySettingButtons[`btn_priv_set_disappear_86400`] = async () => {
-                await this.applyPrivacySetting(m, sock, 'disappear', 86400);
-            };
-            privacySettingButtons[`btn_priv_set_disappear_604800`] = async () => {
-                await this.applyPrivacySetting(m, sock, 'disappear', 604800);
-            };
-        });
-
-        // Combine all button handlers
-        const allButtonHandlers = {
-            ...coreButtons,
-            ...vcfButtons,
-            ...viewButtons,
-            ...mediaDownloadButtons,
-            ...urlButtons,
-            ...tagallButtons,
-            ...privacyButtons,
-            ...privacySettingButtons
-        };
-
-        // Execute button handler
-        if (allButtonHandlers[buttonId]) {
-            await allButtonHandlers[buttonId]();
-        } else {
-            console.log(`Unknown button ID: ${buttonId}`);
-            await m.reply(`❌ Unknown button action. Please try again.`);
+        // ==================== CORE BUTTONS ====================
+        if (buttonId === 'btn_ping') {
+            const start = Date.now();
+            await m.reply(`🏓 Pong!`);
+            const latency = Date.now() - start;
+            await sock.sendMessage(m.from, { 
+                text: `⚡ *CLOUD AI Performance*\n\n⏱️ Latency: ${latency}ms\n🆔 Session: ${this.sessionId}\n📊 Status: Optimal` 
+            });
+            return;
         }
+        
+        if (buttonId === 'btn_status') {
+            const uptime = this.getUptime();
+            const status = `📊 *CLOUD AI System Status*\n\n` +
+                          `• Session: ${this.sessionId}\n` +
+                          `• State: ${this.connectionState}\n` +
+                          `• Uptime: ${uptime}\n` +
+                          `• Reconnects: ${this.reconnectAttempts}/${this.maxReconnectAttempts}\n` +
+                          `• Last Activity: ${this.lastActivity.toLocaleTimeString()}\n` +
+                          `• Memory: ${(process.memoryUsage().heapUsed / 1024 / 1024).toFixed(2)} MB`;
+            await m.reply(status);
+            return;
+        }
+        
+        if (buttonId === 'btn_plugins') {
+            const plugins = Array.from(pluginLoader.plugins.keys());
+            await m.reply(`📦 *Loaded Plugins (${plugins.length})*\n\n${plugins.map(p => `• .${p}`).join('\n')}`);
+            return;
+        }
+        
+        // ==================== OWNER BUTTONS ====================
+        if (buttonId === 'btn_owner' || buttonId === 'btn_core_owner') {
+            await sendInteractiveMessage(sock, m.from, {
+                title: '👑 BERA TECH Contact Suite',
+                text: 'Select contact method:',
+                footer: 'CLOUD AI Professional Contact',
+                interactiveButtons: [
+                    {
+                        name: 'cta_call',
+                        buttonParamsJson: JSON.stringify({
+                            display_text: '📞 Call Primary (+254116763755)',
+                            phone_number: '+254116763755'
+                        })
+                    },
+                    {
+                        name: 'cta_call',
+                        buttonParamsJson: JSON.stringify({
+                            display_text: '📞 Call Secondary (+254743982206)',
+                            phone_number: '+254743982206'
+                        })
+                    },
+                    {
+                        name: 'cta_url',
+                        buttonParamsJson: JSON.stringify({
+                            display_text: '✉️ Send Email',
+                            url: 'mailto:beratech00@gmail.com'
+                        })
+                    },
+                    {
+                        name: 'cta_url',
+                        buttonParamsJson: JSON.stringify({
+                            display_text: '💬 WhatsApp Chat',
+                            url: 'https://wa.me/254116763755'
+                        })
+                    }
+                ]
+            });
+            return;
+        }
+        
+        // ==================== VCF BUTTONS ====================
+        if (buttonId === 'btn_vcf' || buttonId === 'btn_tools_vcf') {
+            if (!m.isGroup) {
+                await m.reply('❌ VCF export only works in groups. Please use this command in a group.');
+                return;
+            }
+            
+            try {
+                const groupMetadata = await sock.groupMetadata(m.from);
+                await sendButtons(sock, m.from, {
+                    title: '📇 Contact Export',
+                    text: `Group: ${groupMetadata.subject}\nMembers: ${groupMetadata.participants.length}`,
+                    footer: 'Select export option',
+                    buttons: [
+                        { id: 'btn_vcf_all', text: '📋 Export All' },
+                        { id: 'btn_vcf_admins', text: '👑 Export Admins' },
+                        { id: 'btn_vcf_cancel', text: '❌ Cancel' }
+                    ]
+                });
+                m.vcfData = { metadata: groupMetadata };
+            } catch (error) {
+                await m.reply('❌ Failed to fetch group info.');
+            }
+            return;
+        }
+        
+        if (buttonId === 'btn_vcf_all') {
+            if (!m.vcfData) {
+                await m.reply('❌ Please run .vcf command first.');
+                return;
+            }
+            await this.exportVCF(m, sock, 'all');
+            return;
+        }
+        
+        if (buttonId === 'btn_vcf_admins') {
+            if (!m.vcfData) {
+                await m.reply('❌ Please run .vcf command first.');
+                return;
+            }
+            await this.exportVCF(m, sock, 'admins');
+            return;
+        }
+        
+        // ==================== TAGALL BUTTONS ====================
+        if (buttonId === 'btn_tagall' || buttonId === 'btn_group_tagall') {
+            if (!m.isGroup) {
+                await m.reply('❌ Tagall only works in groups.');
+                return;
+            }
+            
+            try {
+                const groupMetadata = await sock.groupMetadata(m.from);
+                const participant = groupMetadata.participants.find(p => p.id === m.sender);
+                
+                if (!participant?.admin) {
+                    await m.reply('❌ Only admins can use tagall.');
+                    return;
+                }
+                
+                await sendButtons(sock, m.from, {
+                    title: '🏷️ Tag All Members',
+                    text: `Group: ${groupMetadata.subject}`,
+                    footer: 'Select tagging option',
+                    buttons: [
+                        { id: 'btn_tag_all', text: '👥 Tag Everyone' },
+                        { id: 'btn_tag_admins', text: '👑 Tag Admins' },
+                        { id: 'btn_tag_custom', text: '✏️ Custom Message' }
+                    ]
+                });
+                m.tagallData = { metadata: groupMetadata };
+            } catch (error) {
+                await m.reply('❌ Failed to fetch group info.');
+            }
+            return;
+        }
+        
+        if (buttonId === 'btn_tag_all') {
+            if (!m.tagallData) {
+                await m.reply('❌ Please run .tagall command first.');
+                return;
+            }
+            await this.tagMembers(m, sock, 'all');
+            return;
+        }
+        
+        if (buttonId === 'btn_tag_admins') {
+            if (!m.tagallData) {
+                await m.reply('❌ Please run .tagall command first.');
+                return;
+            }
+            await this.tagMembers(m, sock, 'admins');
+            return;
+        }
+        
+        if (buttonId === 'btn_tag_custom') {
+            if (!m.tagallData) {
+                await m.reply('❌ Please run .tagall command first.');
+                return;
+            }
+            await m.reply('✏️ Please type your custom message for tagging:');
+            this.userStates.set(m.sender, {
+                waitingFor: 'customTagMessage',
+                data: { participants: m.tagallData.metadata.participants }
+            });
+            return;
+        }
+        
+        // ==================== MUSIC BUTTONS ====================
+        if (buttonId === 'btn_play' || buttonId === 'btn_music_play') {
+            await sendButtons(sock, m.from, {
+                title: '🎵 Music Center',
+                text: 'Search for music or browse categories:',
+                footer: 'CLOUD AI Music Player',
+                buttons: [
+                    { id: 'btn_music_search', text: '🔍 Search Music' },
+                    { id: 'btn_music_pop', text: '🎤 Pop Hits' },
+                    { id: 'btn_music_hiphop', text: '🎧 Hip Hop' },
+                    { id: 'btn_music_afro', text: '🌍 Afro Beats' }
+                ]
+            });
+            return;
+        }
+        
+        if (buttonId === 'btn_music_search') {
+            await m.reply('🎵 Please type: `.play song name` to search for music');
+            return;
+        }
+        
+        // ==================== URL/UPLOAD BUTTONS ====================
+        if (buttonId === 'btn_url') {
+            await m.reply('📁 Reply to any media (image/video/audio) with `.url` to upload it');
+            return;
+        }
+        
+        // ==================== PRIVACY BUTTONS ====================
+        if (buttonId.startsWith('btn_priv_')) {
+            const userId = m.sender.split('@')[0];
+            const ownerNumbers = ['254116763755', '254743982206'];
+            
+            if (!ownerNumbers.includes(userId)) {
+                await m.reply('🔒 This feature is owner-only.');
+                return;
+            }
+            
+            if (buttonId === 'btn_priv_lastseen') {
+                await this.showPrivacyOptions(m, sock, 'lastseen');
+            } else if (buttonId === 'btn_priv_profile') {
+                await this.showPrivacyOptions(m, sock, 'profile');
+            } else if (buttonId === 'btn_priv_status') {
+                await this.showPrivacyOptions(m, sock, 'status');
+            } else if (buttonId === 'btn_priv_groupadd') {
+                await this.showPrivacyOptions(m, sock, 'groupadd');
+            } else if (buttonId === 'btn_priv_disappear') {
+                await this.showPrivacyOptions(m, sock, 'disappear');
+            }
+            return;
+        }
+        
+        // ==================== PRIVACY SETTING BUTTONS ====================
+        if (buttonId.startsWith('btn_priv_set_')) {
+            const parts = buttonId.split('_');
+            const settingType = parts[3];
+            const value = parts[4];
+            
+            const userId = m.sender.split('@')[0];
+            const ownerNumbers = ['254116763755', '254743982206'];
+            
+            if (!ownerNumbers.includes(userId)) {
+                await m.reply('🔒 This feature is owner-only.');
+                return;
+            }
+            
+            await this.applyPrivacySetting(m, sock, settingType, value);
+            return;
+        }
+        
+        // ==================== DEFAULT ====================
+        await m.reply(`❌ Button action "${buttonId}" not implemented yet.`);
     }
 
-    // VCF Export handler
-    async handleVCFExport(m, sock, type) {
+    // ==================== VCF EXPORT FUNCTION ====================
+    async exportVCF(m, sock, type) {
         try {
-            if (!m.isGroup) {
-                return m.reply('❌ VCF export only works in groups!');
-            }
-
-            const groupMetadata = await sock.groupMetadata(m.from);
-            let participants = groupMetadata.participants;
+            const { metadata } = m.vcfData;
+            let participants = metadata.participants;
             
             if (type === 'admins') {
                 participants = participants.filter(p => p.admin);
-            }
-            
-            if (participants.length === 0) {
-                return m.reply(`❌ No ${type === 'admins' ? 'admins' : 'participants'} found.`);
             }
             
             await m.reply(`⏳ Creating VCF for ${participants.length} contacts...`);
@@ -502,179 +491,53 @@ class BotRunner {
             participants.forEach(participant => {
                 const phoneNumber = participant.id.split('@')[0];
                 const name = participant.name || participant.notify || `User_${phoneNumber}`;
+                const isAdmin = participant.admin ? ' (Admin)' : '';
                 
-                vcfContent += `BEGIN:VCARD\nVERSION:3.0\nN:${name};;;;\nFN:${name}\nTEL;TYPE=CELL:${phoneNumber}\nEND:VCARD\n\n`;
+                vcfContent += `BEGIN:VCARD\nVERSION:3.0\nN:${name};;;;\nFN:${name}${isAdmin}\nTEL;TYPE=CELL:+${phoneNumber}\nEND:VCARD\n\n`;
             });
             
-            // Save to temp file
-            const fs = require('fs').promises;
-            const path = require('path');
             const tempDir = path.join(__dirname, 'temp');
             await fs.mkdir(tempDir, { recursive: true });
             
-            const filename = `contacts_${type}_${Date.now()}.vcf`;
+            const filename = `contacts_${metadata.subject.replace(/[^a-z0-9]/gi, '_')}_${type}_${Date.now()}.vcf`;
             const filePath = path.join(tempDir, filename);
             await fs.writeFile(filePath, vcfContent, 'utf8');
             
-            // Send file
             await sock.sendMessage(m.from, {
                 document: { url: filePath },
-                fileName: `${groupMetadata.subject.replace(/[^a-z0-9]/gi, '_')}_${type}.vcf`,
+                fileName: filename,
                 mimetype: 'text/vcard',
-                caption: `📇 *Contact Export*\n\nGroup: ${groupMetadata.subject}\nType: ${type}\nExported: ${participants.length} contacts\n\nPowered by CLOUD AI`
+                caption: `✅ *Contact Export Complete*\n\nGroup: ${metadata.subject}\nType: ${type}\nExported: ${participants.length} contacts\n\nPowered by CLOUD AI`
             }, { quoted: m });
             
-            // Cleanup
-            setTimeout(() => fs.unlink(filePath).catch(() => {}), 30000);
+            setTimeout(() => {
+                fs.unlink(filePath).catch(() => {});
+            }, 30000);
             
         } catch (error) {
             console.error('VCF Export Error:', error);
-            m.reply('❌ Error creating contact file.');
+            await m.reply('❌ Error creating VCF file.');
         }
     }
 
-    // View plugin helpers
-    async showMessageInfo(m, sock) {
-        const msg = m.quoted || m;
-        const info = `*📊 Message Information*\n\n` +
-                   `• Message ID: ${msg.key.id}\n` +
-                   `• From: ${msg.key.remoteJid}\n` +
-                   `• Timestamp: ${new Date(msg.messageTimestamp * 1000).toLocaleString()}\n` +
-                   `• Type: ${Object.keys(msg.message || {})[0] || 'text'}\n` +
-                   `• Push Name: ${msg.pushName || 'Unknown'}`;
-        
-        await sock.sendMessage(m.from, { text: info }, { quoted: m });
-    }
-
-    async showFullMediaInfo(m, sock, mediaData) {
-        const { buffer, type, quotedMsg } = mediaData;
-        const info = `*📁 Media Details*\n\n` +
-                   `• Type: ${type}\n` +
-                   `• Size: ${(buffer.length / 1024).toFixed(2)} KB\n` +
-                   `• Dimensions: ${quotedMsg.imageMessage ? `${quotedMsg.imageMessage.width}x${quotedMsg.imageMessage.height}` : 'N/A'}\n` +
-                   `• Caption: ${quotedMsg[`${type}Message`]?.caption || 'None'}\n` +
-                   `• Mimetype: ${quotedMsg[`${type}Message`]?.mimetype || 'Unknown'}`;
-        
-        await sock.sendMessage(m.from, { text: info }, { quoted: m });
-    }
-
-    async downloadMedia(m, sock, mediaData) {
-        const { buffer, type } = mediaData;
-        
+    // ==================== TAG MEMBERS FUNCTION ====================
+    async tagMembers(m, sock, type) {
         try {
-            await m.reply(`⬇️ Downloading ${type}...`);
+            const { metadata } = m.tagallData;
+            let participants = metadata.participants;
             
-            const messageOptions = {};
-            
-            switch(type) {
-                case 'image':
-                    messageOptions.image = buffer;
-                    messageOptions.caption = '📷 Image downloaded via CLOUD AI';
-                    break;
-                case 'video':
-                    messageOptions.video = buffer;
-                    messageOptions.caption = '🎥 Video downloaded via CLOUD AI';
-                    break;
-                case 'audio':
-                    messageOptions.audio = buffer;
-                    messageOptions.mimetype = 'audio/mp4';
-                    messageOptions.ptt = false;
-                    break;
-                case 'document':
-                    messageOptions.document = buffer;
-                    messageOptions.fileName = `download_${Date.now()}.${type}`;
-                    messageOptions.mimetype = 'application/octet-stream';
-                    break;
+            if (type === 'admins') {
+                participants = participants.filter(p => p.admin);
             }
             
-            await sock.sendMessage(m.from, messageOptions, { quoted: m });
-            
-        } catch (error) {
-            console.error('Download Error:', error);
-            m.reply('❌ Error downloading media.');
-        }
-    }
-
-    // URL plugin helpers
-    async uploadToService(m, sock, quotedMsg, service) {
-        try {
-            await m.reply(`⏳ Uploading to ${service === 'tmpfiles' ? 'TmpFiles.org' : 'Catbox.moe'}...`);
-            
-            const { downloadMediaMessage } = require('@whiskeysockets/baileys');
-            const mediaBuffer = await downloadMediaMessage(quotedMsg, 'buffer', {});
-            
-            // Check file size (50MB limit)
-            const fileSizeMB = mediaBuffer.length / (1024 * 1024);
-            if (fileSizeMB > 50) {
-                return m.reply(`❌ File too large! Max 50MB. Your file: ${fileSizeMB.toFixed(2)}MB`);
-            }
-            
-            let uploadUrl = '';
-            
-            if (service === 'tmpfiles') {
-                const { fileTypeFromBuffer } = require('file-type');
-                const { ext } = await fileTypeFromBuffer(mediaBuffer);
-                const FormData = require('form-data');
-                const fetch = require('node-fetch');
-                
-                const form = new FormData();
-                form.append('file', mediaBuffer, `cloudai_${Date.now()}.${ext}`);
-                
-                const response = await fetch('https://tmpfiles.org/api/v1/upload', {
-                    method: 'POST',
-                    body: form
-                });
-                
-                if (!response.ok) throw new Error('TmpFiles upload failed');
-                
-                const data = await response.json();
-                uploadUrl = data.data.url.replace('tmpfiles.org/', 'tmpfiles.org/dl/');
-                
-            } else if (service === 'catbox') {
-                const FormData = require('form-data');
-                const fetch = require('node-fetch');
-                
-                const form = new FormData();
-                form.append('reqtype', 'fileupload');
-                form.append('fileToUpload', mediaBuffer, 'file');
-                
-                const response = await fetch('https://catbox.moe/user/api.php', {
-                    method: 'POST',
-                    body: form
-                });
-                
-                if (!response.ok) throw new Error('Catbox upload failed');
-                
-                uploadUrl = await response.text();
-            }
-            
-            // Send result
-            await sendButtons(sock, m.from, {
-                title: '✅ Upload Successful',
-                text: `Service: ${service === 'tmpfiles' ? 'TmpFiles.org' : 'Catbox.moe'}\nURL: ${uploadUrl}`,
-                footer: 'CLOUD AI Uploader',
-                buttons: [
-                    { id: 'btn_url_copy', text: '📋 Copy URL' },
-                    { id: 'btn_url_new', text: '🔄 New Upload' },
-                    { id: 'btn_url_done', text: '✅ Done' }
-                ]
-            });
-            
-        } catch (error) {
-            console.error('Upload Error:', error);
-            m.reply(`❌ ${service} upload failed. Try again or use another service.`);
-        }
-    }
-
-    // TagAll plugin helpers
-    async tagEveryone(m, sock, participants, message) {
-        try {
             await m.reply(`⏳ Tagging ${participants.length} members...`);
             
             const mentions = participants.map(p => p.id);
-            const tagMessage = `${message}\n\n` + 
-                              participants.map(p => `@${p.id.split('@')[0]}`).join(' ') + 
-                              `\n\n🏷️ Tagged by: @${m.sender.split('@')[0]}\n📅 ${new Date().toLocaleDateString()}`;
+            const tagMessage = `🔔 *Attention ${type === 'admins' ? 'Admins' : 'Everyone'}!*\n\n` +
+                              `Message from: @${m.sender.split('@')[0]}\n` +
+                              `Group: ${metadata.subject}\n\n` +
+                              mentions.map(p => `@${p.split('@')[0]}`).join(' ') +
+                              `\n\n🏷️ Powered by CLOUD AI`;
             
             await sock.sendMessage(m.from, {
                 text: tagMessage,
@@ -683,39 +546,46 @@ class BotRunner {
             
         } catch (error) {
             console.error('Tag Error:', error);
-            m.reply('❌ Error tagging members.');
+            await m.reply('❌ Error tagging members.');
         }
     }
 
-    async requestCustomTagMessage(m, sock, participants) {
-        // Store participants and ask for custom message
-        this.userStates.set(m.sender, {
-            waitingFor: 'customTagMessage',
-            data: { participants }
-        });
+    // ==================== PRIVACY FUNCTIONS ====================
+    async showPrivacyOptions(m, sock, settingType) {
+        const options = {
+            lastseen: ['all', 'contacts', 'none'],
+            profile: ['all', 'contacts', 'none'],
+            status: ['all', 'contacts', 'none'],
+            groupadd: ['all', 'contacts', 'none'],
+            disappear: ['0', '86400', '604800']
+        };
         
-        await sendButtons(sock, m.from, {
-            title: '✏️ Custom Tag Message',
-            text: `Members: ${participants.length}\n\nPlease send your custom message now.\nUse {count} for member count, {time} for current time.`,
-            footer: 'I will add mentions automatically',
-            buttons: [
-                { id: 'btn_tag_default', text: '🔄 Use Default' },
-                { id: 'btn_tag_cancel', text: '❌ Cancel' }
-            ]
-        });
-    }
-
-    // Privacy plugin helpers
-    async showPrivacyOptions(m, sock, setting, options, labels) {
-        const buttons = options.map((option, index) => ({
-            id: `btn_priv_set_${setting}_${option}`,
-            text: labels[index]
+        const labels = {
+            all: '👁️ Everyone',
+            contacts: '📱 Contacts',
+            none: '🙈 Nobody',
+            '0': '❌ Off',
+            '86400': '⏰ 24 Hours',
+            '604800': '📅 7 Days'
+        };
+        
+        const settingLabels = {
+            lastseen: 'Last Seen',
+            profile: 'Profile Photo',
+            status: 'Status',
+            groupadd: 'Group Add',
+            disappear: 'Disappearing Messages'
+        };
+        
+        const buttons = options[settingType].map(value => ({
+            id: `btn_priv_set_${settingType}_${value}`,
+            text: labels[value] || value
         }));
         
-        buttons.push({ id: 'btn_priv_back', text: '🔙 Back' });
+        buttons.push({ id: 'btn_priv_cancel', text: '❌ Cancel' });
         
         await sendButtons(sock, m.from, {
-            title: `🔐 ${setting.charAt(0).toUpperCase() + setting.slice(1)} Privacy`,
+            title: `🔐 ${settingLabels[settingType]} Privacy`,
             text: 'Select privacy level:',
             footer: 'CLOUD AI Privacy Manager',
             buttons: buttons
@@ -724,30 +594,28 @@ class BotRunner {
 
     async applyPrivacySetting(m, sock, settingType, value) {
         try {
-            // Check if user is owner
-            const userId = m.sender.split('@')[0];
-            const ownerNumbers = ['254116763755', '254743982206'];
+            await m.reply(`⚙️ Updating ${settingType} privacy...`);
             
-            if (!ownerNumbers.includes(userId)) {
-                return m.reply('❌ This command is owner-only.');
-            }
-            
-            await m.reply(`⏳ Updating ${settingType} privacy...`);
-            
+            // Note: Actual privacy API might need adjustment based on Baileys version
             if (settingType === 'disappear') {
                 await sock.updateDisappearingMode(parseInt(value));
             } else {
                 await sock.updatePrivacySettings(settingType, value);
             }
             
-            const readableValue = settingType === 'disappear' 
-                ? value === 0 ? 'Off' : `${value / 3600} hours`
-                : value;
+            const readableValue = {
+                'all': 'Everyone',
+                'contacts': 'Contacts',
+                'none': 'Nobody',
+                '0': 'Off',
+                '86400': '24 Hours',
+                '604800': '7 Days'
+            }[value] || value;
             
             await sendButtons(sock, m.from, {
                 title: '✅ Privacy Updated',
-                text: `Setting: ${settingType}\nValue: ${readableValue}\n\nChanges applied successfully!`,
-                footer: 'CLOUD AI Privacy',
+                text: `Setting: ${settingType}\nValue: ${readableValue}`,
+                footer: 'Changes applied successfully',
                 buttons: [
                     { id: 'btn_priv_more', text: '⚙️ More Settings' },
                     { id: 'btn_priv_done', text: '✅ Done' }
@@ -756,21 +624,22 @@ class BotRunner {
             
         } catch (error) {
             console.error('Privacy Update Error:', error);
-            m.reply(`❌ Failed to update ${settingType} privacy. Check console for details.`);
+            await m.reply(`❌ Failed to update ${settingType} privacy.`);
         }
     }
 
+    // ==================== HELPER FUNCTIONS ====================
     async handleBuiltinCommand(m, sock, cmd, args) {
         switch(cmd) {
             case 'ping':
                 const start = Date.now();
                 await m.reply(`🏓 Pong!`);
                 const latency = Date.now() - start;
-                await sock.sendMessage(m.from, { text: `⏱️ Latency: ${latency}ms\n🆔 ${this.sessionId}` });
+                await sock.sendMessage(m.from, { text: `⏱️ Latency: ${latency}ms` });
                 break;
                 
             case 'menu':
-                // Will be handled by menu plugin
+                // Handled by menu plugin
                 break;
                 
             case 'plugins':
@@ -781,7 +650,7 @@ class BotRunner {
                 
             case 'status':
                 const uptime = this.getUptime();
-                const status = `☁️ *CLOUD AI Status*\n\n` +
+                const status = `📊 *CLOUD AI Status*\n\n` +
                               `• Session: ${this.sessionId}\n` +
                               `• State: ${this.connectionState}\n` +
                               `• Uptime: ${uptime}\n` +
@@ -791,7 +660,7 @@ class BotRunner {
                 break;
                 
             default:
-                await m.reply(`❓ Unknown command: .${cmd}\n\nType .menu for commands\nType .plugins to see loaded plugins`);
+                await m.reply(`❓ Unknown command: .${cmd}\n\nType .menu for commands`);
         }
     }
 
@@ -812,13 +681,12 @@ class BotRunner {
             m.from = this.decodeJid(m.key.remoteJid);
             m.isGroup = m.from.endsWith("@g.us");
             
-            // ✅ CORRECTED SENDER LOGIC for PMs
             if (m.isGroup) {
                 m.sender = this.decodeJid(m.key.participant);
             } else if (m.isSelf) {
                 m.sender = this.decodeJid(sock.user.id);
             } else {
-                m.sender = m.from;  // ✅ PM from another user
+                m.sender = m.from;
             }
         }
         
@@ -879,9 +747,7 @@ class BotRunner {
                               `🆔 ${this.sessionId}\n` +
                               `🔧 Prefix: ${process.env.BOT_PREFIX || '.'}\n` +
                               `📢 Use .menu for commands\n\n` +
-                              `*Powered by BERA TECH*\n` +
-                              `📞 Contact: ${process.env.OWNER_NUMBER || '254116763755'}\n` +
-                              `✉️ Email: beratech00@gmail.com`;
+                              `*Powered by BERA TECH*`;
             
             await this.socket.sendMessage(this.socket.user.id, { text: welcomeMsg });
         } catch (error) {
@@ -917,14 +783,13 @@ class BotRunner {
             delete global.activeBots[this.sessionId];
         }
         
-        // Clear user states
         this.userStates.clear();
         
         console.log(`🛑 CLOUD AI bot stopped: ${this.sessionId}`);
     }
 }
 
-// Initialize system function
+// ==================== EXPORT FUNCTIONS ====================
 async function initializeBotSystem() {
     try {
         console.log('☁️ CLOUD AI system initialized successfully');
@@ -935,7 +800,6 @@ async function initializeBotSystem() {
     }
 }
 
-// Function to start a bot instance
 async function startBotInstance(sessionId, authState) {
     const bot = new BotRunner(sessionId, authState);
     await bot.start();
@@ -954,7 +818,6 @@ function getActiveBots() {
     return global.activeBots || {};
 }
 
-// Initialize global bot storage
 global.activeBots = {};
 
 module.exports = {
