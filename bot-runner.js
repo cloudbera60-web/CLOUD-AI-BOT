@@ -147,11 +147,31 @@ class BotRunner {
                 
                 const body = this.extractMessageText(m.message);
                 
-                // DEBUG: Log message structure
                 console.log('📥 Message received from:', m.sender.substring(0, 8));
                 console.log('📦 Message type:', Object.keys(m.message || {})[0]);
                 
-                // Check for button responses FIRST (this is the key fix)
+                // ==================== BUTTON DETECTION ====================
+                // Check for interactive template buttons
+                if (m.message?.templateButtonReplyMessage) {
+                    const buttonId = m.message.templateButtonReplyMessage.selectedId;
+                    console.log(`🔘 Template button clicked: ${buttonId}`);
+                    if (buttonId) {
+                        await this.handleButtonClick(m, socket, buttonId);
+                        return;
+                    }
+                }
+                
+                // Check for interactive list buttons
+                if (m.message?.interactiveResponseMessage?.listReply) {
+                    const buttonId = m.message.interactiveResponseMessage.listReply.singleSelectReply.selectedRowId;
+                    console.log(`📋 Interactive list button: ${buttonId}`);
+                    if (buttonId) {
+                        await this.handleButtonClick(m, socket, buttonId);
+                        return;
+                    }
+                }
+                
+                // Check for button responses
                 if (m.message.buttonsResponseMessage) {
                     const buttonId = m.message.buttonsResponseMessage.selectedButtonId;
                     console.log(`🎯 Button clicked detected: ${buttonId}`);
@@ -165,16 +185,6 @@ class BotRunner {
                 if (m.message.listResponseMessage) {
                     const buttonId = m.message.listResponseMessage.selectedRowId;
                     console.log(`📋 List button clicked: ${buttonId}`);
-                    if (buttonId) {
-                        await this.handleButtonClick(m, socket, buttonId);
-                        return;
-                    }
-                }
-                
-                // Check for template button responses
-                if (m.message.templateButtonReplyMessage) {
-                    const buttonId = m.message.templateButtonReplyMessage.selectedId;
-                    console.log(`🔘 Template button clicked: ${buttonId}`);
                     if (buttonId) {
                         await this.handleButtonClick(m, socket, buttonId);
                         return;
@@ -261,7 +271,7 @@ class BotRunner {
     async handleButtonClick(m, sock, buttonId) {
         console.log(`🎯 Processing button click: ${buttonId} by ${m.sender.substring(0, 8)}...`);
         
-        // Normalize button ID (remove prefixes if needed)
+        // Normalize button ID
         let normalizedId = buttonId;
         if (!buttonId.startsWith('btn_')) {
             normalizedId = `btn_${buttonId}`;
@@ -273,12 +283,11 @@ class BotRunner {
         await m.React('✅').catch(() => {});
         
         // ==================== CORE BUTTONS ====================
-        if (normalizedId === 'btn_ping' || buttonId === 'ping') {
+        if (normalizedId === 'btn_ping' || buttonId === 'ping' || normalizedId === 'btn_core_ping') {
             const start = Date.now();
-            const pingMsg = await m.reply(`🏓 Testing latency...`);
+            await m.reply(`🏓 Testing latency...`);
             const latency = Date.now() - start;
             
-            // Get bot ping from WebSocket
             const wsPing = sock.ws?.ping || 'N/A';
             
             const status = `⚡ *CLOUD AI Performance Report*\n\n` +
@@ -293,7 +302,7 @@ class BotRunner {
             return;
         }
         
-        if (normalizedId === 'btn_status' || buttonId === 'status') {
+        if (normalizedId === 'btn_status' || buttonId === 'status' || normalizedId === 'btn_core_status') {
             const uptime = this.getUptime();
             const memoryUsage = (process.memoryUsage().heapUsed / 1024 / 1024).toFixed(2);
             const status = `📊 *CLOUD AI System Status*\n\n` +
@@ -308,7 +317,7 @@ class BotRunner {
             return;
         }
         
-        if (normalizedId === 'btn_plugins' || buttonId === 'plugins') {
+        if (normalizedId === 'btn_plugins' || buttonId === 'plugins' || normalizedId === 'btn_core_plugins') {
             const plugins = Array.from(pluginLoader.plugins.keys());
             const pluginList = plugins.length > 0 
                 ? plugins.map(p => `• .${p}`).join('\n')
@@ -317,8 +326,7 @@ class BotRunner {
             return;
         }
         
-        if (normalizedId === 'btn_menu' || buttonId === 'menu') {
-            // Trigger the menu command
+        if (normalizedId === 'btn_menu' || buttonId === 'menu' || normalizedId === 'btn_core_menu') {
             const menuPlugin = pluginLoader.plugins.get('menu');
             if (menuPlugin) {
                 m.body = '.menu';
@@ -370,110 +378,159 @@ class BotRunner {
         }
         
         // ==================== VCF BUTTONS ====================
-        if (normalizedId === 'btn_vcf' || normalizedId === 'btn_tools_vcf' || buttonId === 'vcf') {
-            if (!m.isGroup) {
-                await m.reply('❌ VCF export only works in groups. Please use this command in a group.');
+        if (normalizedId === 'btn_vcf_all_pro' || normalizedId === 'btn_vcf_all') {
+            if (!m.vcfData && !m.exportData) {
+                await m.reply('❌ Please run .vcf command first.');
                 return;
             }
             
-            try {
-                const groupMetadata = await sock.groupMetadata(m.from);
-                await sendButtons(sock, m.from, {
-                    title: '📇 Contact Export',
-                    text: `Group: ${groupMetadata.subject}\nMembers: ${groupMetadata.participants.length}`,
-                    footer: 'Select export option',
-                    buttons: [
-                        { id: 'btn_vcf_all', text: '📋 Export All' },
-                        { id: 'btn_vcf_admins', text: '👑 Export Admins' },
-                        { id: 'btn_vcf_cancel', text: '❌ Cancel' }
-                    ]
-                });
-                m.vcfData = { metadata: groupMetadata };
-            } catch (error) {
-                await m.reply('❌ Failed to fetch group info.');
-            }
+            const data = m.vcfData || m.exportData;
+            await this.exportVCF(m, sock, 'all', data);
             return;
         }
         
-        if (normalizedId === 'btn_vcf_all') {
-            if (!m.vcfData) {
+        if (normalizedId === 'btn_vcf_admins_pro' || normalizedId === 'btn_vcf_admins') {
+            if (!m.vcfData && !m.exportData) {
                 await m.reply('❌ Please run .vcf command first.');
                 return;
             }
-            await this.exportVCF(m, sock, 'all');
+            
+            const data = m.vcfData || m.exportData;
+            await this.exportVCF(m, sock, 'admins', data);
             return;
         }
         
-        if (normalizedId === 'btn_vcf_admins') {
-            if (!m.vcfData) {
-                await m.reply('❌ Please run .vcf command first.');
+        if (normalizedId === 'btn_vcf_custom') {
+            await m.reply('⚙️ Custom selection feature coming soon!\n\nUse: .vcf for group contact export');
+            return;
+        }
+        
+        if (normalizedId === 'btn_vcf_cancel' || normalizedId === 'btn_core_cancel') {
+            await m.reply('✅ VCF export cancelled.');
+            delete m.vcfData;
+            delete m.exportData;
+            return;
+        }
+        
+        // ==================== URL/UPLOAD BUTTONS ====================
+        if (normalizedId === 'btn_url_tutorial') {
+            const tutorial = `📚 *Media Upload Tutorial*\n\n` +
+                            `1. *Reply* to any media (image/video/audio/document)\n` +
+                            `2. Type *${process.env.BOT_PREFIX || '.'}url*\n` +
+                            `3. Select upload service\n` +
+                            `4. Get shareable link\n\n` +
+                            `📁 *Max Size:* 50MB\n` +
+                            `🌐 *Supported:* Images, Videos, Audio, Documents`;
+            await m.reply(tutorial);
+            return;
+        }
+        
+        if (normalizedId === 'btn_url_formats') {
+            const formats = `📋 *Supported Formats*\n\n` +
+                           `🖼️ *Images:* JPG, PNG, GIF, WebP\n` +
+                           `🎥 *Videos:* MP4, MOV, AVI, MKV\n` +
+                           `🎵 *Audio:* MP3, M4A, OGG, WAV\n` +
+                           `📄 *Documents:* PDF, DOC, TXT, ZIP\n` +
+                           `📁 *Max Size:* 50MB\n` +
+                           `⚡ *Fast Upload:* Instant processing`;
+            await m.reply(formats);
+            return;
+        }
+        
+        if (normalizedId === 'btn_url_tmpfiles') {
+            if (!m.uploadData) {
+                await m.reply('❌ Please reply to media first with .url');
                 return;
             }
-            await this.exportVCF(m, sock, 'admins');
+            await this.handleMediaUpload(m, sock, 'tmpfiles');
+            return;
+        }
+        
+        if (normalizedId === 'btn_url_catbox') {
+            if (!m.uploadData) {
+                await m.reply('❌ Please reply to media first with .url');
+                return;
+            }
+            await this.handleMediaUpload(m, sock, 'catbox');
+            return;
+        }
+        
+        if (normalizedId === 'btn_url_analysis') {
+            if (!m.uploadData) {
+                await m.reply('❌ Please reply to media first with .url');
+                return;
+            }
+            await this.analyzeMedia(m, sock);
+            return;
+        }
+        
+        if (normalizedId === 'btn_url_copy') {
+            await m.reply('📋 Copy URL feature - coming soon!\n\nFor now, long-press the URL link to copy.');
+            return;
+        }
+        
+        if (normalizedId === 'btn_url_new') {
+            await m.reply('🔄 For new upload, reply to another media with .url');
+            return;
+        }
+        
+        if (normalizedId === 'btn_url_cancel') {
+            await m.reply('✅ Upload cancelled.');
+            delete m.uploadData;
             return;
         }
         
         // ==================== TAGALL BUTTONS ====================
-        if (normalizedId === 'btn_tagall' || normalizedId === 'btn_group_tagall' || buttonId === 'tagall') {
-            if (!m.isGroup) {
-                await m.reply('❌ Tagall only works in groups.');
+        if (normalizedId === 'btn_tag_all_pro' || normalizedId === 'btn_tag_all') {
+            if (!m.tagallData && !m.groupManagerData) {
+                await m.reply('❌ Please run .tagall command first.');
                 return;
             }
             
-            try {
-                const groupMetadata = await sock.groupMetadata(m.from);
-                const participant = groupMetadata.participants.find(p => p.id === m.sender);
-                
-                if (!participant?.admin) {
-                    await m.reply('❌ Only admins can use tagall.');
-                    return;
-                }
-                
-                await sendButtons(sock, m.from, {
-                    title: '🏷️ Tag All Members',
-                    text: `Group: ${groupMetadata.subject}`,
-                    footer: 'Select tagging option',
-                    buttons: [
-                        { id: 'btn_tag_all', text: '👥 Tag Everyone' },
-                        { id: 'btn_tag_admins', text: '👑 Tag Admins' },
-                        { id: 'btn_tag_custom', text: '✏️ Custom Message' }
-                    ]
-                });
-                m.tagallData = { metadata: groupMetadata };
-            } catch (error) {
-                await m.reply('❌ Failed to fetch group info.');
-            }
+            const data = m.tagallData || m.groupManagerData;
+            await this.tagMembers(m, sock, 'all', data);
             return;
         }
         
-        if (normalizedId === 'btn_tag_all') {
-            if (!m.tagallData) {
+        if (normalizedId === 'btn_tag_admins_pro' || normalizedId === 'btn_tag_admins') {
+            if (!m.tagallData && !m.groupManagerData) {
                 await m.reply('❌ Please run .tagall command first.');
                 return;
             }
-            await this.tagMembers(m, sock, 'all');
+            
+            const data = m.tagallData || m.groupManagerData;
+            await this.tagMembers(m, sock, 'admins', data);
             return;
         }
         
-        if (normalizedId === 'btn_tag_admins') {
-            if (!m.tagallData) {
+        if (normalizedId === 'btn_tag_regular') {
+            if (!m.groupManagerData) {
                 await m.reply('❌ Please run .tagall command first.');
                 return;
             }
-            await this.tagMembers(m, sock, 'admins');
+            await this.tagMembers(m, sock, 'regular', m.groupManagerData);
             return;
         }
         
-        if (normalizedId === 'btn_tag_custom') {
-            if (!m.tagallData) {
+        if (normalizedId === 'btn_tag_custom_msg' || normalizedId === 'btn_tag_custom') {
+            if (!m.tagallData && !m.groupManagerData) {
                 await m.reply('❌ Please run .tagall command first.');
                 return;
             }
+            
+            const data = m.tagallData || m.groupManagerData;
             await m.reply('✏️ Please type your custom message for tagging:');
             this.userStates.set(m.sender, {
                 waitingFor: 'customTagMessage',
-                data: { participants: m.tagallData.metadata.participants }
+                data: { participants: data.metadata.participants }
             });
+            return;
+        }
+        
+        if (normalizedId === 'btn_tag_cancel') {
+            await m.reply('✅ Tag operation cancelled.');
+            delete m.tagallData;
+            delete m.groupManagerData;
             return;
         }
         
@@ -498,57 +555,44 @@ class BotRunner {
             return;
         }
         
-        // ==================== URL/UPLOAD BUTTONS ====================
-        if (normalizedId === 'btn_url' || buttonId === 'url') {
-            await m.reply('📁 Reply to any media (image/video/audio) with `.url` to upload it');
+        if (normalizedId === 'btn_music_help') {
+            const help = `🎵 *Music Player Help*\n\n` +
+                        `• .play [song name] - Search and download music\n` +
+                        `• Click buttons for quick access\n` +
+                        `• Supported: YouTube music\n` +
+                        `• High quality audio`;
+            await m.reply(help);
             return;
         }
         
         // ==================== PRIVACY BUTTONS ====================
-        if (normalizedId.startsWith('btn_priv_')) {
-            const userId = m.sender.split('@')[0];
-            const ownerNumbers = ['254116763755', '254743982206'];
-            
-            if (!ownerNumbers.includes(userId)) {
-                await m.reply('🔒 This feature is owner-only.');
-                return;
-            }
-            
-            if (normalizedId === 'btn_priv_lastseen') {
-                await this.showPrivacyOptions(m, sock, 'lastseen');
-            } else if (normalizedId === 'btn_priv_profile') {
-                await this.showPrivacyOptions(m, sock, 'profile');
-            } else if (normalizedId === 'btn_priv_status') {
-                await this.showPrivacyOptions(m, sock, 'status');
-            } else if (normalizedId === 'btn_priv_groupadd') {
-                await this.showPrivacyOptions(m, sock, 'groupadd');
-            } else if (normalizedId === 'btn_priv_disappear') {
-                await this.showPrivacyOptions(m, sock, 'disappear');
-            }
+        if (normalizedId === 'btn_priv_visibility') {
+            await this.showPrivacyOptions(m, sock, 'lastseen');
             return;
         }
         
-        // ==================== PRIVACY SETTING BUTTONS ====================
-        if (normalizedId.startsWith('btn_priv_set_')) {
-            const parts = normalizedId.split('_');
-            const settingType = parts[3];
-            const value = parts[4];
-            
-            const userId = m.sender.split('@')[0];
-            const ownerNumbers = ['254116763755', '254743982206'];
-            
-            if (!ownerNumbers.includes(userId)) {
-                await m.reply('🔒 This feature is owner-only.');
-                return;
-            }
-            
-            await this.applyPrivacySetting(m, sock, settingType, value);
+        if (normalizedId === 'btn_priv_messaging') {
+            await this.showPrivacyOptions(m, sock, 'disappear');
             return;
         }
         
-        // ==================== CANCEL BUTTONS ====================
-        if (normalizedId.includes('cancel') || normalizedId.includes('done')) {
-            await m.reply('✅ Operation completed.');
+        if (normalizedId === 'btn_priv_account') {
+            await this.showPrivacyOptions(m, sock, 'profile');
+            return;
+        }
+        
+        if (normalizedId === 'btn_priv_bot') {
+            await m.reply('🤖 Bot controls - Owner only');
+            return;
+        }
+        
+        if (normalizedId === 'btn_priv_advanced') {
+            await this.showPrivacyOptions(m, sock, 'status');
+            return;
+        }
+        
+        if (normalizedId === 'btn_priv_cancel' || normalizedId === 'btn_priv_done') {
+            await m.reply('✅ Privacy settings closed.');
             return;
         }
         
@@ -557,43 +601,60 @@ class BotRunner {
     }
 
     // ==================== VCF EXPORT FUNCTION ====================
-    async exportVCF(m, sock, type) {
+    async exportVCF(m, sock, type, data) {
         try {
-            const { metadata } = m.vcfData;
-            let participants = metadata.participants;
+            const { metadata, participants, admins } = data;
+            let exportParticipants = [];
+            let exportType = '';
             
-            if (type === 'admins') {
-                participants = participants.filter(p => p.admin);
+            switch(type) {
+                case 'all':
+                    exportParticipants = participants || metadata.participants;
+                    exportType = 'All Contacts';
+                    break;
+                case 'admins':
+                    exportParticipants = admins || (participants ? participants.filter(p => p.admin) : metadata.participants.filter(p => p.admin));
+                    exportType = 'Administrators Only';
+                    break;
+                default:
+                    return m.reply('❌ Invalid export type.');
             }
             
-            await m.reply(`⏳ Creating VCF for ${participants.length} contacts...`);
+            if (exportParticipants.length === 0) {
+                return m.reply(`❌ No ${type === 'admins' ? 'administrators' : 'contacts'} found to export.`);
+            }
+            
+            await m.reply(`⏳ Creating VCF for ${exportParticipants.length} contacts...`);
             
             let vcfContent = '';
-            participants.forEach(participant => {
+            exportParticipants.forEach(participant => {
                 const phoneNumber = participant.id.split('@')[0];
                 const name = participant.name || participant.notify || `User_${phoneNumber}`;
-                const isAdmin = participant.admin ? ' (Admin)' : '';
+                const isAdmin = participant.admin ? ';ADMIN' : '';
                 
-                vcfContent += `BEGIN:VCARD\nVERSION:3.0\nN:${name};;;;\nFN:${name}${isAdmin}\nTEL;TYPE=CELL:+${phoneNumber}\nEND:VCARD\n\n`;
+                vcfContent += `BEGIN:VCARD\nVERSION:3.0\nN:${name};;;;\nFN:${name}\nTEL;TYPE=CELL${isAdmin}:+${phoneNumber}\nNOTE:Exported from ${metadata.subject}\nEND:VCARD\n`;
             });
             
             const tempDir = path.join(__dirname, 'temp');
             await fs.mkdir(tempDir, { recursive: true });
             
-            const filename = `contacts_${metadata.subject.replace(/[^a-z0-9]/gi, '_')}_${type}_${Date.now()}.vcf`;
+            const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+            const groupName = metadata.subject.replace(/[^a-z0-9]/gi, '_').substring(0, 30);
+            const filename = `contacts_${groupName}_${timestamp}.vcf`;
             const filePath = path.join(tempDir, filename);
+            
             await fs.writeFile(filePath, vcfContent, 'utf8');
             
             await sock.sendMessage(m.from, {
                 document: { url: filePath },
                 fileName: filename,
                 mimetype: 'text/vcard',
-                caption: `✅ *Contact Export Complete*\n\nGroup: ${metadata.subject}\nType: ${type}\nExported: ${participants.length} contacts\n\nPowered by CLOUD AI`
+                caption: `✅ *Contact Export Complete*\n\nGroup: ${metadata.subject}\nType: ${exportType}\nExported: ${exportParticipants.length} contacts\n\nPowered by CLOUD AI`
             }, { quoted: m });
             
             setTimeout(() => {
                 fs.unlink(filePath).catch(() => {});
-            }, 30000);
+            }, 300000);
             
         } catch (error) {
             console.error('VCF Export Error:', error);
@@ -602,19 +663,37 @@ class BotRunner {
     }
 
     // ==================== TAG MEMBERS FUNCTION ====================
-    async tagMembers(m, sock, type) {
+    async tagMembers(m, sock, type, data) {
         try {
-            const { metadata } = m.tagallData;
-            let participants = metadata.participants;
+            const { metadata, participants, admins, regularMembers } = data;
+            let targetParticipants = [];
+            let tagType = '';
             
-            if (type === 'admins') {
-                participants = participants.filter(p => p.admin);
+            switch(type) {
+                case 'all':
+                    targetParticipants = participants || metadata.participants;
+                    tagType = 'All Members';
+                    break;
+                case 'admins':
+                    targetParticipants = admins || (participants ? participants.filter(p => p.admin) : metadata.participants.filter(p => p.admin));
+                    tagType = 'Administrators';
+                    break;
+                case 'regular':
+                    targetParticipants = regularMembers || (participants ? participants.filter(p => !p.admin) : metadata.participants.filter(p => !p.admin));
+                    tagType = 'Regular Members';
+                    break;
+                default:
+                    return m.reply('❌ Invalid tag type.');
             }
             
-            await m.reply(`⏳ Tagging ${participants.length} members...`);
+            if (targetParticipants.length === 0) {
+                return m.reply(`❌ No ${tagType.toLowerCase()} found to tag.`);
+            }
             
-            const mentions = participants.map(p => p.id);
-            const tagMessage = `🔔 *Attention ${type === 'admins' ? 'Admins' : 'Everyone'}!*\n\n` +
+            await m.reply(`⏳ Tagging ${targetParticipants.length} members...`);
+            
+            const mentions = targetParticipants.map(p => p.id);
+            const tagMessage = `🔔 *${tagType.toUpperCase()} NOTIFICATION*\n\n` +
                               `Message from: @${m.sender.split('@')[0]}\n` +
                               `Group: ${metadata.subject}\n\n` +
                               mentions.map(p => `@${p.split('@')[0]}`).join(' ') +
@@ -628,6 +707,110 @@ class BotRunner {
         } catch (error) {
             console.error('Tag Error:', error);
             await m.reply('❌ Error tagging members.');
+        }
+    }
+
+    // ==================== MEDIA UPLOAD FUNCTION ====================
+    async handleMediaUpload(m, sock, service) {
+        try {
+            const { quotedMsg } = m.uploadData;
+            await m.reply(`⚙️ Uploading to ${service === 'tmpfiles' ? 'TmpFiles.org' : 'Catbox.moe'}...`);
+            
+            const mediaBuffer = await downloadMediaMessage(quotedMsg, 'buffer', {});
+            const fileSizeMB = (mediaBuffer.length / (1024 * 1024)).toFixed(2);
+            
+            if (fileSizeMB > 50) {
+                return m.reply(`❌ *File Too Large*\n\nSize: ${fileSizeMB}MB\nLimit: 50MB\n\nPlease use a smaller file.`);
+            }
+            
+            let uploadUrl = '';
+            let serviceName = '';
+            
+            if (service === 'tmpfiles') {
+                serviceName = 'TmpFiles.org';
+                const { ext } = await fileTypeFromBuffer(mediaBuffer);
+                const form = new FormData();
+                form.append('file', mediaBuffer, `cloudai_${Date.now()}.${ext}`);
+                
+                const response = await fetch('https://tmpfiles.org/api/v1/upload', {
+                    method: 'POST',
+                    body: form
+                });
+                
+                if (!response.ok) throw new Error('TmpFiles upload failed');
+                
+                const responseData = await response.json();
+                uploadUrl = responseData.data.url.replace('tmpfiles.org/', 'tmpfiles.org/dl/');
+                
+            } else if (service === 'catbox') {
+                serviceName = 'Catbox.moe';
+                const form = new FormData();
+                form.append('reqtype', 'fileupload');
+                form.append('fileToUpload', mediaBuffer, 'file');
+                
+                const response = await fetch('https://catbox.moe/user/api.php', {
+                    method: 'POST',
+                    body: form
+                });
+                
+                if (!response.ok) throw new Error('Catbox upload failed');
+                
+                uploadUrl = await response.text();
+            }
+            
+            const result = `✅ *Upload Successful*\n\n` +
+                          `🌐 Service: ${serviceName}\n` +
+                          `📁 Size: ${fileSizeMB}MB\n` +
+                          `🔗 URL: ${uploadUrl}\n\n` +
+                          `Link expires: ${service === 'tmpfiles' ? '1 hour' : 'Permanent'}`;
+            
+            await sock.sendMessage(m.from, { text: result }, { quoted: m });
+            
+        } catch (error) {
+            console.error('Upload Error:', error);
+            await m.reply(`❌ ${service} upload failed: ${error.message}`);
+        }
+    }
+
+    // ==================== MEDIA ANALYSIS FUNCTION ====================
+    async analyzeMedia(m, sock) {
+        try {
+            const { quotedMsg } = m.uploadData;
+            await m.reply('📊 Analyzing media...');
+            
+            const mediaBuffer = await downloadMediaMessage(quotedMsg, 'buffer', {});
+            const fileSizeMB = (mediaBuffer.length / (1024 * 1024)).toFixed(2);
+            
+            let mediaType = 'Unknown';
+            let dimensions = 'N/A';
+            
+            if (quotedMsg.imageMessage) {
+                mediaType = 'Image';
+                dimensions = `${quotedMsg.imageMessage.width}x${quotedMsg.imageMessage.height}`;
+            } else if (quotedMsg.videoMessage) {
+                mediaType = 'Video';
+                dimensions = `${quotedMsg.videoMessage.width}x${quotedMsg.videoMessage.height}`;
+            } else if (quotedMsg.audioMessage) {
+                mediaType = 'Audio';
+                dimensions = `${quotedMsg.audioMessage.seconds}s`;
+            } else if (quotedMsg.documentMessage) {
+                mediaType = 'Document';
+                dimensions = quotedMsg.documentMessage.fileName || 'Unknown';
+            }
+            
+            const analysis = `📊 *Media Analysis*\n\n` +
+                            `📁 Type: ${mediaType}\n` +
+                            `📏 Size: ${fileSizeMB} MB\n` +
+                            `📐 Dimensions: ${dimensions}\n` +
+                            `🎯 Format: ${quotedMsg[`${mediaType.toLowerCase()}Message`]?.mimetype || 'Unknown'}\n` +
+                            `📝 Caption: ${quotedMsg[`${mediaType.toLowerCase()}Message`]?.caption || 'None'}\n\n` +
+                            `Ready for upload!`;
+            
+            await sock.sendMessage(m.from, { text: analysis }, { quoted: m });
+            
+        } catch (error) {
+            console.error('Analysis Error:', error);
+            await m.reply('❌ Failed to analyze media.');
         }
     }
 
@@ -750,8 +933,8 @@ class BotRunner {
         if (message.extendedTextMessage?.text) return message.extendedTextMessage.text;
         if (message.imageMessage?.caption) return message.imageMessage.caption;
         if (message.videoMessage?.caption) return message.videoMessage.caption;
-        if (message.buttonsResponseMessage?.selectedButtonId) return null; // Don't extract text from buttons
-        if (message.listResponseMessage?.selectedRowId) return null; // Don't extract text from list buttons
+        if (message.buttonsResponseMessage?.selectedButtonId) return null;
+        if (message.listResponseMessage?.selectedRowId) return null;
         return '';
     }
 
