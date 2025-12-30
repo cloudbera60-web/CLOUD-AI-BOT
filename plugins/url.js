@@ -1,53 +1,32 @@
 const fetch = require('node-fetch');
 const FormData = require('form-data');
 const { fileTypeFromBuffer } = require('file-type');
-const { writeFile, unlink } = require('fs/promises');
 const { sendButtons } = require('gifted-btns');
+const { downloadMediaMessage } = require('@whiskeysockets/baileys');
 
-const MAX_FILE_SIZE_MB = 50;
-
-async function uploadMedia(buffer) {
-  try {
-    const { ext } = await fileTypeFromBuffer(buffer);
-    const form = new FormData();
-    
-    form.append('file', buffer, `upload_${Date.now()}.${ext}`);
-    form.append('expires', '1h');
-    
-    const response = await fetch('https://tmpfiles.org/api/v1/upload', {
-      method: 'POST',
-      body: form
-    });
-    
-    if (!response.ok) {
-      throw new Error(`Upload failed: ${response.status}: ${response.statusText}`);
-    }
-    
-    const data = await response.json();
-    return data.data.url.replace('tmpfiles.org/', 'tmpfiles.org/dl/');
-    
-  } catch (error) {
-    console.error('Upload Error:', error);
-    throw new Error('Media upload failed');
-  }
-}
-
-const tourl = async (m, sock) => {
+module.exports = async (m, sock) => {
   const prefix = process.env.BOT_PREFIX || '.';
   const cmd = m.body.startsWith(prefix) ? m.body.slice(prefix.length).split(' ')[0].toLowerCase() : '';
   
   if (cmd === 'url' || cmd === 'upload') {
     try {
       if (!m.quoted) {
-        // Show URL options with buttons
         await sendButtons(sock, m.from, {
-          title: '🔗 URL Uploader',
-          text: 'Reply to a media message or select an option:',
-          footer: 'Upload media to get a direct URL',
+          title: '🌐 Media Processing Center',
+          text: `*CLOUD AI Media Processor*\n\n` +
+                `📊 **Supported Formats:**\n` +
+                `• Images (JPG, PNG, GIF)\n` +
+                `• Videos (MP4, MOV)\n` +
+                `• Audio (MP3, M4A)\n` +
+                `• Documents (PDF, DOC)\n\n` +
+                `📁 **Max Size:** 50MB\n` +
+                `⚡ **Processing:** Instant\n\n` +
+                `*How to use:* Reply to any media with .url`,
+          footer: 'Professional Media Hosting | Secure & Fast',
           buttons: [
-            { id: 'btn_url_help', text: '❓ How to Use' },
-            { id: 'btn_url_example', text: '📋 Example' },
-            { id: 'btn_url_cancel', text: '❌ Cancel' }
+            { id: 'btn_url_tutorial', text: '📚 How to Use' },
+            { id: 'btn_url_formats', text: '📋 Supported Formats' },
+            { id: 'btn_url_cancel', text: '❌ Close' }
           ]
         });
         return;
@@ -55,83 +34,64 @@ const tourl = async (m, sock) => {
       
       const quotedMsg = m.quoted;
       
-      // Check for media in quoted message
-      const mediaTypes = ['imageMessage', 'videoMessage', 'audioMessage'];
+      // Check for media
+      const mediaTypes = ['imageMessage', 'videoMessage', 'audioMessage', 'documentMessage'];
       const hasMedia = mediaTypes.some(type => quotedMsg[type]);
       
       if (!hasMedia) {
-        return m.reply('❌ Please reply to an image, video, or audio message.');
+        return m.reply('❌ *No Media Detected*\nPlease reply to an image, video, audio, or document.');
       }
       
-      // Show upload options
       await sendButtons(sock, m.from, {
-        title: '⬆️ Upload Media',
-        text: 'Media detected! Select upload service:',
-        footer: 'Max file size: 50MB',
+        title: '⬆️ Media Upload Selection',
+        text: `*MEDIA DETECTED*\n\n` +
+              `✅ **Status:** Ready for Processing\n` +
+              `📁 **Type:** ${Object.keys(quotedMsg).find(key => mediaTypes.includes(key))?.replace('Message', '') || 'Unknown'}\n` +
+              `⚡ **Service:** Select hosting provider\n\n` +
+              `*Choose upload service:*`,
+        footer: 'CLOUD AI Professional Hosting',
         buttons: [
-          { id: 'btn_url_tmpfiles', text: '🌐 TmpFiles (1 hour)' },
-          { id: 'btn_url_catbox', text: '📦 Catbox (permanent)' },
+          { id: 'btn_url_tmpfiles', text: '🌐 TmpFiles (1 Hour)' },
+          { id: 'btn_url_catbox', text: '📦 Catbox (Permanent)' },
+          { id: 'btn_url_analysis', text: '📊 File Analysis' },
           { id: 'btn_url_cancel', text: '❌ Cancel' }
         ]
       });
       
-      // Store message for button handling
       m.uploadData = { quotedMsg };
       
     } catch (error) {
-      console.error('URL Error:', error);
-      m.reply('❌ Error processing upload request.');
+      console.error('❌ URL Processor Error:', error);
+      m.reply('❌ Media processing failed. Please try again.');
     }
   }
 };
 
-// Button handler for URL
-const handleURLButton = async (m, sock, buttonId, uploadData) => {
-  switch(buttonId) {
-    case 'btn_url_help':
-      await m.reply(`*🔗 URL Uploader Help*\n\nUsage:\n1. Reply to any media (image/video/audio)\n2. Use .url command\n3. Select upload service\n4. Get direct URL\n\nSupported: Images, Videos, Audio\nMax Size: 50MB\n\nPowered by CLOUD AI`);
-      break;
-      
-    case 'btn_url_example':
-      await m.reply('*📋 Example:*\n1. Send or forward an image\n2. Reply to it with `.url`\n3. Select upload service\n4. Get direct link to share');
-      break;
-      
-    case 'btn_url_tmpfiles':
-      if (uploadData) {
-        await uploadToService(m, sock, uploadData.quotedMsg, 'tmpfiles');
-      }
-      break;
-      
-    case 'btn_url_catbox':
-      if (uploadData) {
-        await uploadToService(m, sock, uploadData.quotedMsg, 'catbox');
-      }
-      break;
-      
-    case 'btn_url_cancel':
-      await m.reply('✅ Upload cancelled.');
-      break;
-  }
-};
-
-async function uploadToService(m, sock, quotedMsg, service) {
+// Upload handler
+async function handleMediaUpload(service, data, m, sock) {
   try {
-    await m.reply(`⏳ Uploading to ${service === 'tmpfiles' ? 'TmpFiles.org' : 'Catbox.moe'}...`);
+    const processingMsg = await m.reply(`⚙️ *Processing Media Upload*\n\n` +
+      `🌐 **Service:** ${service === 'tmpfiles' ? 'TmpFiles.org' : 'Catbox.moe'}\n` +
+      `📁 **Status:** Downloading media...\n` +
+      `⏱️ **Time:** ${new Date().toLocaleTimeString()}\n\n` +
+      `_Please wait while we process your file..._`);
     
     // Download media
-    const { downloadMediaMessage } = require('@whiskeysockets/baileys');
-    const mediaBuffer = await downloadMediaMessage(quotedMsg, 'buffer', {});
+    const mediaBuffer = await downloadMediaMessage(data.quotedMsg, 'buffer', {});
+    const fileSizeMB = (mediaBuffer.length / (1024 * 1024)).toFixed(2);
     
-    // Check file size
-    const fileSizeMB = mediaBuffer.length / (1024 * 1024);
-    if (fileSizeMB > MAX_FILE_SIZE_MB) {
-      return m.reply(`❌ File too large! Max ${MAX_FILE_SIZE_MB}MB. Your file: ${fileSizeMB.toFixed(2)}MB`);
+    if (fileSizeMB > 50) {
+      return m.reply(`❌ *File Too Large*\n\n` +
+        `📊 **Size:** ${fileSizeMB}MB\n` +
+        `📏 **Limit:** 50MB\n\n` +
+        `_Please use a smaller file._`);
     }
     
     let uploadUrl = '';
+    let serviceName = '';
     
     if (service === 'tmpfiles') {
-      // Upload to tmpfiles.org
+      serviceName = 'TmpFiles.org';
       const { ext } = await fileTypeFromBuffer(mediaBuffer);
       const form = new FormData();
       form.append('file', mediaBuffer, `cloudai_${Date.now()}.${ext}`);
@@ -143,11 +103,11 @@ async function uploadToService(m, sock, quotedMsg, service) {
       
       if (!response.ok) throw new Error('TmpFiles upload failed');
       
-      const data = await response.json();
-      uploadUrl = data.data.url.replace('tmpfiles.org/', 'tmpfiles.org/dl/');
+      const responseData = await response.json();
+      uploadUrl = responseData.data.url.replace('tmpfiles.org/', 'tmpfiles.org/dl/');
       
     } else if (service === 'catbox') {
-      // Upload to catbox.moe
+      serviceName = 'Catbox.moe';
       const form = new FormData();
       form.append('reqtype', 'fileupload');
       form.append('fileToUpload', mediaBuffer, 'file');
@@ -162,22 +122,31 @@ async function uploadToService(m, sock, quotedMsg, service) {
       uploadUrl = await response.text();
     }
     
-    // Send result with buttons
+    // Success response with clickable button
     await sendButtons(sock, m.from, {
       title: '✅ Upload Successful',
-      text: `Service: ${service === 'tmpfiles' ? 'TmpFiles.org' : 'Catbox.moe'}\nURL: ${uploadUrl}`,
-      footer: 'CLOUD AI Uploader',
+      text: `*MEDIA HOSTING COMPLETE*\n\n` +
+            `✅ **Status:** Uploaded Successfully\n` +
+            `🌐 **Service:** ${serviceName}\n` +
+            `📁 **Size:** ${fileSizeMB}MB\n` +
+            `🔗 **URL:** ${uploadUrl}\n\n` +
+            `*Click the button below to open the URL:*`,
+      footer: 'CLOUD AI Professional Hosting | Secure Link',
       buttons: [
-        { id: 'btn_url_copy', text: '📋 Copy URL', data: uploadUrl },
-        { id: 'btn_url_new', text: '🔄 New Upload' },
-        { id: 'btn_url_done', text: '✅ Done' }
+        {
+          name: 'cta_url',
+          buttonParamsJson: JSON.stringify({
+            display_text: '🌐 Open Media URL',
+            url: uploadUrl
+          })
+        },
+        { id: 'btn_url_copy', text: '📋 Copy URL' },
+        { id: 'btn_url_new', text: '🔄 New Upload' }
       ]
     });
     
   } catch (error) {
-    console.error('Upload Error:', error);
-    m.reply(`❌ ${service} upload failed. Try again or use another service.`);
+    console.error('❌ Upload Process Error:', error);
+    m.reply(`❌ ${service} upload failed. Please try another service.`);
   }
 }
-
-module.exports = tourl;
