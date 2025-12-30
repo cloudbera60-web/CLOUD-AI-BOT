@@ -302,18 +302,40 @@ class BotRunner {
             return;
         }
         
-        if (normalizedId === 'btn_status' || buttonId === 'status' || normalizedId === 'btn_core_status') {
+        if (normalizedId === 'btn_status' || buttonId === 'status' || normalizedId === 'btn_core_status' || normalizedId === 'btn_system_status') {
             const uptime = this.getUptime();
             const memoryUsage = (process.memoryUsage().heapUsed / 1024 / 1024).toFixed(2);
+            
+            // Get system information
+            const os = require('os');
+            const totalMemory = (os.totalmem() / 1024 / 1024 / 1024).toFixed(2);
+            const freeMemory = (os.freemem() / 1024 / 1024 / 1024).toFixed(2);
+            const platform = os.platform();
+            const arch = os.arch();
+            
             const status = `📊 *CLOUD AI System Status*\n\n` +
-                          `• Session: ${this.sessionId}\n` +
-                          `• State: ${this.connectionState}\n` +
-                          `• Uptime: ${uptime}\n` +
-                          `• Reconnects: ${this.reconnectAttempts}/${this.maxReconnectAttempts}\n` +
-                          `• Last Activity: ${this.lastActivity.toLocaleTimeString()}\n` +
-                          `• Memory: ${memoryUsage} MB\n` +
-                          `• Plugins: ${pluginLoader.plugins.size} loaded`;
-            await m.reply(status);
+                          `🆔 Session: ${this.sessionId}\n` +
+                          `🔌 State: ${this.connectionState}\n` +
+                          `⏱️ Uptime: ${uptime}\n` +
+                          `🔄 Reconnects: ${this.reconnectAttempts}/${this.maxReconnectAttempts}\n` +
+                          `📅 Last Activity: ${this.lastActivity.toLocaleTimeString()}\n` +
+                          `💾 Memory: ${memoryUsage} MB\n` +
+                          `💿 Total RAM: ${totalMemory} GB\n` +
+                          `📦 Free RAM: ${freeMemory} GB\n` +
+                          `🖥️ Platform: ${platform} ${arch}\n` +
+                          `🔌 Plugins: ${pluginLoader.plugins.size} loaded\n` +
+                          `🌐 Node.js: ${process.version}`;
+            
+            await sendButtons(sock, m.from, {
+                title: '📊 System Status',
+                text: status,
+                footer: 'Real-time system metrics',
+                buttons: [
+                    { id: 'btn_ping', text: '🏓 Ping Test' },
+                    { id: 'btn_plugins', text: '📦 Plugins' },
+                    { id: 'btn_menu_back', text: '🔙 Back' }
+                ]
+            });
             return;
         }
         
@@ -334,6 +356,184 @@ class BotRunner {
             } else {
                 await m.reply('❌ Menu plugin not found.');
             }
+            return;
+        }
+        
+        // ==================== MENU CATEGORY BUTTONS ====================
+        if (normalizedId === 'btn_menu_tools' || normalizedId === 'btn_menu') {
+            await sendButtons(sock, m.from, {
+                title: '🛠️ Tools Menu',
+                text: `*Available Tools:*\n\n• .ping - Check bot speed\n• .vcf - Export group contacts\n• .url - Upload media to cloud\n• .logo - Generate logos\n• .play - Download music\n• .view - Media viewer`,
+                footer: 'Select a tool or use command',
+                buttons: [
+                    { id: 'btn_ping', text: '🏓 Ping' },
+                    { id: 'btn_vcf', text: '📇 VCF Export' },
+                    { id: 'btn_url', text: '🌐 URL Upload' },
+                    { id: 'btn_logo_menu', text: '🎨 Logo Maker' },
+                    { id: 'btn_play', text: '🎵 Music' },
+                    { id: 'btn_view', text: '👁️ View Media' },
+                    { id: 'btn_menu_back', text: '🔙 Back' }
+                ]
+            });
+            return;
+        }
+        
+        if (normalizedId === 'btn_menu_media') {
+            await sendButtons(sock, m.from, {
+                title: '📁 Media Menu',
+                text: `*Media Tools:*\n\n• .url - Upload files\n• .view - View/download media\n• .play - Music downloader\n• Image editing tools\n• Video tools\n• Audio tools`,
+                footer: 'Media processing tools',
+                buttons: [
+                    { id: 'btn_url', text: '🌐 Upload' },
+                    { id: 'btn_view', text: '👁️ View Media' },
+                    { id: 'btn_play', text: '🎵 Music' },
+                    { id: 'btn_menu_back', text: '🔙 Back' }
+                ]
+            });
+            return;
+        }
+        
+        if (normalizedId === 'btn_menu_group' || normalizedId === 'btn_group_tagall') {
+            if (!m.isGroup) {
+                await m.reply('❌ Group features only work in groups.');
+                return;
+            }
+            
+            await sendButtons(sock, m.from, {
+                title: '👥 Group Menu',
+                text: `*Group Management:*\n\n• .tagall - Tag all members\n• .vcf - Export contacts\n• Group info\n• Admin tools\n• Member management\n• Settings`,
+                footer: 'Group administration tools',
+                buttons: [
+                    { id: 'btn_tagall', text: '🏷️ Tag All' },
+                    { id: 'btn_vcf', text: '📇 Export Contacts' },
+                    { id: 'btn_menu_back', text: '🔙 Back' }
+                ]
+            });
+            return;
+        }
+        
+        if (normalizedId === 'btn_menu_fun') {
+            await sendButtons(sock, m.from, {
+                title: '🎮 Fun Menu',
+                text: `*Fun & Games:*\n\n• .logo - Logo generator\n• Sticker maker\n• Games\n• AI chat\n• Entertainment\n• Random tools`,
+                footer: 'Entertainment features',
+                buttons: [
+                    { id: 'btn_logo_menu', text: '🎨 Logo Maker' },
+                    { id: 'btn_menu_back', text: '🔙 Back' }
+                ]
+            });
+            return;
+        }
+        
+        if (normalizedId === 'btn_menu_owner') {
+            // Owner verification
+            const userId = m.sender.split('@')[0];
+            const ownerNumbers = ['254116763755', '254743982206'];
+            
+            if (!ownerNumbers.includes(userId)) {
+                await m.reply('🔒 *Owner Access Required*\nThis menu is restricted to BERA TECH.');
+                return;
+            }
+            
+            await sendButtons(sock, m.from, {
+                title: '👑 Owner Menu',
+                text: `*Owner Tools:*\n\n• .mode - Change bot mode\n• .autoreact - Auto reactions\n• .autotyping - Fake typing\n• .autorecording - Recording status\n• .privacy - Privacy settings\n• Bot controls`,
+                footer: 'Owner-only commands',
+                buttons: [
+                    { id: 'btn_mode_info', text: '⚙️ Bot Mode' },
+                    { id: 'btn_priv_visibility', text: '🔐 Privacy' },
+                    { id: 'btn_autoreact', text: '💬 Auto React' },
+                    { id: 'btn_autotyping', text: '⌨️ Auto Typing' },
+                    { id: 'btn_menu_back', text: '🔙 Back' }
+                ]
+            });
+            return;
+        }
+        
+        if (normalizedId === 'btn_menu_back') {
+            // Go back to main menu
+            const menuPlugin = pluginLoader.plugins.get('menu');
+            if (menuPlugin) {
+                m.body = '.menu';
+                await menuPlugin(m, sock);
+            } else {
+                // Fallback to main menu buttons
+                await sendButtons(sock, m.from, {
+                    title: '☁️ CLOUD AI Menu',
+                    text: 'Main Menu - Select a category:',
+                    footer: 'Powered by BERA TECH',
+                    buttons: [
+                        { id: 'btn_menu_tools', text: '🛠️ Tools' },
+                        { id: 'btn_menu_media', text: '📁 Media' },
+                        { id: 'btn_menu_group', text: '👥 Group' },
+                        { id: 'btn_menu_fun', text: '🎮 Fun' },
+                        { id: 'btn_menu_owner', text: '👑 Owner' },
+                        { id: 'btn_system_status', text: '📊 Status' }
+                    ]
+                });
+            }
+            return;
+        }
+        
+        // ==================== LOGO MENU SYSTEM ====================
+        if (normalizedId === 'btn_logo_menu') {
+            // Logo category menu
+            await sendButtons(sock, m.from, {
+                title: '🎨 Logo Generator',
+                text: `*Select logo category:*\n\nOr type directly:\n.logo [style] [text]\nExample: .logo glow CLOUD AI`,
+                footer: 'Choose a category or type manually',
+                buttons: [
+                    { id: 'btn_logo_popular', text: '🎨 Popular' },
+                    { id: 'btn_logo_water', text: '🌊 Water' },
+                    { id: 'btn_logo_glow', text: '✨ Glow' },
+                    { id: 'btn_logo_creative', text: '🎭 Creative' },
+                    { id: 'btn_logo_backgrounds', text: '🌌 Backgrounds' },
+                    { id: 'btn_logo_special', text: '🎉 Special' },
+                    { id: 'btn_menu_back', text: '🔙 Back' }
+                ]
+            });
+            return;
+        }
+        
+        // Logo sub-categories
+        const logoCategories = {
+            'btn_logo_popular': ['blackpink', 'glow', 'naruto', 'hacker', 'luxury', 'avatar'],
+            'btn_logo_water': ['water', 'water3d', 'underwater', 'wetglass', 'bulb'],
+            'btn_logo_glow': ['glossysilver', 'gold', 'textlight', 'bokeh', 'neon'],
+            'btn_logo_creative': ['graffiti', 'paint', 'typography', 'rotation', 'digitalglitch'],
+            'btn_logo_backgrounds': ['galaxy', 'blood', 'snow', 'thunder', 'sand', 'wall'],
+            'btn_logo_special': ['birthdaycake', 'halloween', 'valentine', 'pubg', 'zodiac', 'team']
+        };
+        
+        if (Object.keys(logoCategories).includes(normalizedId)) {
+            const styles = logoCategories[normalizedId];
+            const categoryName = {
+                'btn_logo_popular': 'Popular',
+                'btn_logo_water': 'Water Effects',
+                'btn_logo_glow': 'Glow Effects',
+                'btn_logo_creative': 'Creative',
+                'btn_logo_backgrounds': 'Backgrounds',
+                'btn_logo_special': 'Special'
+            }[normalizedId];
+            
+            let buttons = styles.map(style => ({
+                id: `btn_logo_select_${style}`,
+                text: style.charAt(0).toUpperCase() + style.slice(1)
+            }));
+            buttons.push({ id: 'btn_logo_menu', text: '🔙 Back' });
+            
+            await sendButtons(sock, m.from, {
+                title: `🎨 ${categoryName} Logos`,
+                text: `*Select a style:*\n\nThen type:\n\`\`\`.logo [style] [your text]\`\`\`\n\nExample:\n.logo ${styles[0]} CLOUD AI`,
+                footer: 'Click style, then type command',
+                buttons: buttons.slice(0, 6) // WhatsApp limit
+            });
+            return;
+        }
+        
+        if (normalizedId.startsWith('btn_logo_select_')) {
+            const style = normalizedId.replace('btn_logo_select_', '');
+            await m.reply(`🎨 *Logo Style Selected:* ${style}\n\nNow type:\n\`\`\`.logo ${style} YOUR TEXT HERE\`\`\`\n\nExample:\n\`\`\`.logo ${style} CLOUD AI BOT\`\`\`\n\nTip: You can add emojis too!`);
             return;
         }
         
@@ -377,7 +577,189 @@ class BotRunner {
             return;
         }
         
+        // Owner feature buttons
+        if (normalizedId === 'btn_autoreact') {
+            const userId = m.sender.split('@')[0];
+            const ownerNumbers = ['254116763755', '254743982206'];
+            
+            if (!ownerNumbers.includes(userId)) {
+                await m.reply('🔒 Owner access required.');
+                return;
+            }
+            
+            await sendButtons(sock, m.from, {
+                title: '💬 Auto-Reaction',
+                text: `*Auto-Reaction Settings*\n\nBot will automatically react to messages.\n\nCurrent: ${process.env.AUTO_REACT === 'true' ? 'ON ✅' : 'OFF ❌'}`,
+                footer: 'Owner only feature',
+                buttons: [
+                    { id: 'btn_autoreact_on', text: '✅ Turn ON' },
+                    { id: 'btn_autoreact_off', text: '❌ Turn OFF' },
+                    { id: 'btn_menu_owner', text: '🔙 Back' }
+                ]
+            });
+            return;
+        }
+        
+        if (normalizedId === 'btn_autotyping') {
+            const userId = m.sender.split('@')[0];
+            const ownerNumbers = ['254116763755', '254743982206'];
+            
+            if (!ownerNumbers.includes(userId)) {
+                await m.reply('🔒 Owner access required.');
+                return;
+            }
+            
+            const config = require('../config.cjs');
+            await sendButtons(sock, m.from, {
+                title: '⌨️ Auto-Typing',
+                text: `*Auto-Typing Settings*\n\nBot will show fake typing indicators.\n\nCurrent: ${config.AUTO_TYPING ? 'ON ✅' : 'OFF ❌'}`,
+                footer: 'Owner only feature',
+                buttons: [
+                    { id: 'btn_autotyping_on', text: '✅ Turn ON' },
+                    { id: 'btn_autotyping_off', text: '❌ Turn OFF' },
+                    { id: 'btn_menu_owner', text: '🔙 Back' }
+                ]
+            });
+            return;
+        }
+        
+        if (normalizedId === 'btn_autoreact_on') {
+            const userId = m.sender.split('@')[0];
+            const ownerNumbers = ['254116763755', '254743982206'];
+            
+            if (!ownerNumbers.includes(userId)) {
+                await m.reply('🔒 Owner access required.');
+                return;
+            }
+            
+            process.env.AUTO_REACT = 'true';
+            await m.reply('✅ Auto-reaction turned ON\nBot will now react to messages automatically.');
+            return;
+        }
+        
+        if (normalizedId === 'btn_autoreact_off') {
+            const userId = m.sender.split('@')[0];
+            const ownerNumbers = ['254116763755', '254743982206'];
+            
+            if (!ownerNumbers.includes(userId)) {
+                await m.reply('🔒 Owner access required.');
+                return;
+            }
+            
+            process.env.AUTO_REACT = 'false';
+            await m.reply('❌ Auto-reaction turned OFF');
+            return;
+        }
+        
+        if (normalizedId === 'btn_autotyping_on') {
+            const userId = m.sender.split('@')[0];
+            const ownerNumbers = ['254116763755', '254743982206'];
+            
+            if (!ownerNumbers.includes(userId)) {
+                await m.reply('🔒 Owner access required.');
+                return;
+            }
+            
+            const config = require('../config.cjs');
+            config.AUTO_TYPING = true;
+            await m.reply('⌨️ Auto-typing turned ON\nBot will show random typing indicators.');
+            return;
+        }
+        
+        if (normalizedId === 'btn_autotyping_off') {
+            const userId = m.sender.split('@')[0];
+            const ownerNumbers = ['254116763755', '254743982206'];
+            
+            if (!ownerNumbers.includes(userId)) {
+                await m.reply('🔒 Owner access required.');
+                return;
+            }
+            
+            const config = require('../config.cjs');
+            config.AUTO_TYPING = false;
+            await m.reply('🚫 Auto-typing turned OFF');
+            return;
+        }
+        
+        if (normalizedId === 'btn_mode_info') {
+            const userId = m.sender.split('@')[0];
+            const ownerNumbers = ['254116763755', '254743982206'];
+            
+            if (!ownerNumbers.includes(userId)) {
+                await m.reply('🔒 Owner access required.');
+                return;
+            }
+            
+            const config = require('../config.cjs');
+            const currentMode = config.BOT_MODE || 'private';
+            const info = `⚙️ *Bot Mode Information*\n\n` +
+                        `Current: ${currentMode.toUpperCase()}\n\n` +
+                        `🌐 *Public Mode:*\n• Everyone can use commands\n• All features available\n\n` +
+                        `🔒 *Private Mode:*\n• Only owner can use commands\n• Restricted access`;
+            
+            await sendButtons(sock, m.from, {
+                title: '⚙️ Bot Mode',
+                text: info,
+                footer: 'Owner only configuration',
+                buttons: [
+                    { id: 'btn_mode_public', text: '🌐 Set Public' },
+                    { id: 'btn_mode_private', text: '🔒 Set Private' },
+                    { id: 'btn_menu_owner', text: '🔙 Back' }
+                ]
+            });
+            return;
+        }
+        
+        if (normalizedId === 'btn_mode_public') {
+            const userId = m.sender.split('@')[0];
+            const ownerNumbers = ['254116763755', '254743982206'];
+            
+            if (!ownerNumbers.includes(userId)) {
+                await m.reply('🔒 Owner access required.');
+                return;
+            }
+            
+            const config = require('../config.cjs');
+            config.BOT_MODE = 'public';
+            process.env.BOT_MODE = 'public';
+            await m.reply(`🌐 *Public Mode ACTIVATED*\n\nEveryone can now use bot commands.`);
+            return;
+        }
+        
+        if (normalizedId === 'btn_mode_private') {
+            const userId = m.sender.split('@')[0];
+            const ownerNumbers = ['254116763755', '254743982206'];
+            
+            if (!ownerNumbers.includes(userId)) {
+                await m.reply('🔒 Owner access required.');
+                return;
+            }
+            
+            const config = require('../config.cjs');
+            config.BOT_MODE = 'private';
+            process.env.BOT_MODE = 'private';
+            await m.reply(`🔒 *Private Mode ACTIVATED*\n\nOnly owner can use bot commands.`);
+            return;
+        }
+        
         // ==================== VCF BUTTONS ====================
+        if (normalizedId === 'btn_vcf' || normalizedId === 'btn_tools_vcf') {
+            if (!m.isGroup) {
+                await m.reply('❌ VCF export only works in groups.');
+                return;
+            }
+            
+            // Trigger the vcf command
+            const vcfPlugin = pluginLoader.plugins.get('vcf');
+            if (vcfPlugin) {
+                m.body = '.vcf';
+                await vcfPlugin(m, sock);
+            } else {
+                await m.reply('❌ VCF plugin not found.');
+            }
+            return;
+        }
+        
         if (normalizedId === 'btn_vcf_all_pro' || normalizedId === 'btn_vcf_all') {
             if (!m.vcfData && !m.exportData) {
                 await m.reply('❌ Please run .vcf command first.');
@@ -412,7 +794,104 @@ class BotRunner {
             return;
         }
         
+        // ==================== TAGALL BUTTONS ====================
+        if (normalizedId === 'btn_tagall') {
+            if (!m.isGroup) {
+                await m.reply('❌ Tagall only works in groups.');
+                return;
+            }
+            
+            // Trigger the tagall command
+            const tagallPlugin = pluginLoader.plugins.get('tagall');
+            if (tagallPlugin) {
+                m.body = '.tagall';
+                await tagallPlugin(m, sock);
+            } else {
+                await m.reply('❌ Tagall plugin not found.');
+            }
+            return;
+        }
+        
+        if (normalizedId === 'btn_tag_all_pro' || normalizedId === 'btn_tag_all') {
+            if (!m.tagallData && !m.groupManagerData) {
+                await m.reply('❌ Please run .tagall command first.');
+                return;
+            }
+            
+            const data = m.tagallData || m.groupManagerData;
+            await this.tagMembers(m, sock, 'all', data);
+            return;
+        }
+        
+        if (normalizedId === 'btn_tag_admins_pro' || normalizedId === 'btn_tag_admins') {
+            if (!m.tagallData && !m.groupManagerData) {
+                await m.reply('❌ Please run .tagall command first.');
+                return;
+            }
+            
+            const data = m.tagallData || m.groupManagerData;
+            await this.tagMembers(m, sock, 'admins', data);
+            return;
+        }
+        
+        if (normalizedId === 'btn_tag_regular') {
+            if (!m.groupManagerData) {
+                await m.reply('❌ Please run .tagall command first.');
+                return;
+            }
+            await this.tagMembers(m, sock, 'regular', m.groupManagerData);
+            return;
+        }
+        
+        if (normalizedId === 'btn_tag_custom_msg' || normalizedId === 'btn_tag_custom') {
+            if (!m.tagallData && !m.groupManagerData) {
+                await m.reply('❌ Please run .tagall command first.');
+                return;
+            }
+            
+            const data = m.tagallData || m.groupManagerData;
+            await m.reply('✏️ Please type your custom message for tagging:');
+            this.userStates.set(m.sender, {
+                waitingFor: 'customTagMessage',
+                data: { participants: data.metadata.participants }
+            });
+            return;
+        }
+        
+        if (normalizedId === 'btn_tag_cancel') {
+            await m.reply('✅ Tag operation cancelled.');
+            delete m.tagallData;
+            delete m.groupManagerData;
+            return;
+        }
+        
         // ==================== URL/UPLOAD BUTTONS ====================
+        if (normalizedId === 'btn_url' || buttonId === 'url') {
+            if (!m.quoted) {
+                await sendButtons(sock, m.from, {
+                    title: '🌐 Media Upload',
+                    text: `*How to use:*\n1. Reply to any media\n2. Click "Upload" button\n3. Select service\n\nOr type: .url`,
+                    footer: 'Media hosting service',
+                    buttons: [
+                        { id: 'btn_url_tutorial', text: '📚 Tutorial' },
+                        { id: 'btn_url_formats', text: '📋 Formats' },
+                        { id: 'btn_menu_back', text: '🔙 Back' }
+                    ]
+                });
+                return;
+            }
+            
+            // Trigger the url command
+            const urlPlugin = pluginLoader.plugins.get('url');
+            if (urlPlugin) {
+                m.body = '.url';
+                await urlPlugin(m, sock);
+            } else {
+                await m.reply('❌ URL plugin not found.');
+            }
+            return;
+        }
+        
         if (normalizedId === 'btn_url_tutorial') {
             const tutorial = `📚 *Media Upload Tutorial*\n\n` +
                             `1. *Reply* to any media (image/video/audio/document)\n` +
@@ -480,60 +959,6 @@ class BotRunner {
             return;
         }
         
-        // ==================== TAGALL BUTTONS ====================
-        if (normalizedId === 'btn_tag_all_pro' || normalizedId === 'btn_tag_all') {
-            if (!m.tagallData && !m.groupManagerData) {
-                await m.reply('❌ Please run .tagall command first.');
-                return;
-            }
-            
-            const data = m.tagallData || m.groupManagerData;
-            await this.tagMembers(m, sock, 'all', data);
-            return;
-        }
-        
-        if (normalizedId === 'btn_tag_admins_pro' || normalizedId === 'btn_tag_admins') {
-            if (!m.tagallData && !m.groupManagerData) {
-                await m.reply('❌ Please run .tagall command first.');
-                return;
-            }
-            
-            const data = m.tagallData || m.groupManagerData;
-            await this.tagMembers(m, sock, 'admins', data);
-            return;
-        }
-        
-        if (normalizedId === 'btn_tag_regular') {
-            if (!m.groupManagerData) {
-                await m.reply('❌ Please run .tagall command first.');
-                return;
-            }
-            await this.tagMembers(m, sock, 'regular', m.groupManagerData);
-            return;
-        }
-        
-        if (normalizedId === 'btn_tag_custom_msg' || normalizedId === 'btn_tag_custom') {
-            if (!m.tagallData && !m.groupManagerData) {
-                await m.reply('❌ Please run .tagall command first.');
-                return;
-            }
-            
-            const data = m.tagallData || m.groupManagerData;
-            await m.reply('✏️ Please type your custom message for tagging:');
-            this.userStates.set(m.sender, {
-                waitingFor: 'customTagMessage',
-                data: { participants: data.metadata.participants }
-            });
-            return;
-        }
-        
-        if (normalizedId === 'btn_tag_cancel') {
-            await m.reply('✅ Tag operation cancelled.');
-            delete m.tagallData;
-            delete m.groupManagerData;
-            return;
-        }
-        
         // ==================== MUSIC BUTTONS ====================
         if (normalizedId === 'btn_play' || normalizedId === 'btn_music_play' || buttonId === 'play') {
             await sendButtons(sock, m.from, {
@@ -562,6 +987,105 @@ class BotRunner {
                         `• Supported: YouTube music\n` +
                         `• High quality audio`;
             await m.reply(help);
+            return;
+        }
+        
+        // ==================== VIEW BUTTONS ====================
+        if (normalizedId === 'btn_view' || buttonId === 'view') {
+            // Trigger the view command
+            const viewPlugin = pluginLoader.plugins.get('view');
+            if (viewPlugin) {
+                m.body = '.view';
+                await viewPlugin(m, sock);
+            } else {
+                await m.reply('❌ View plugin not found.');
+            }
+            return;
+        }
+        
+        if (normalizedId === 'btn_view_download') {
+            if (!m.viewData) {
+                await m.reply('❌ No media data found.');
+                return;
+            }
+            
+            const { buffer, type, quotedMsg, fileSize } = m.viewData;
+            
+            try {
+                if (type === 'image') {
+                    await sock.sendMessage(m.from, {
+                        image: buffer,
+                        caption: `📷 Downloaded via CLOUD AI\nSize: ${fileSize} MB`
+                    }, { quoted: m });
+                } else if (type === 'video') {
+                    await sock.sendMessage(m.from, {
+                        video: buffer,
+                        caption: `🎥 Downloaded via CLOUD AI\nSize: ${fileSize} MB`,
+                        mimetype: 'video/mp4'
+                    }, { quoted: m });
+                } else if (type === 'audio') {
+                    const mimetype = quotedMsg.audioMessage?.mimetype || 'audio/mp4';
+                    await sock.sendMessage(m.from, {
+                        audio: buffer,
+                        mimetype: mimetype,
+                        ptt: false
+                    }, { quoted: m });
+                } else if (type === 'document') {
+                    const filename = quotedMsg.documentMessage?.fileName || `download_${Date.now()}.${type}`;
+                    await sock.sendMessage(m.from, {
+                        document: buffer,
+                        fileName: filename,
+                        mimetype: quotedMsg.documentMessage?.mimetype || 'application/octet-stream'
+                    }, { quoted: m });
+                }
+                await m.React('✅');
+            } catch (error) {
+                console.error('Download Error:', error);
+                await m.reply('❌ Failed to download media.');
+            }
+            return;
+        }
+        
+        if (normalizedId === 'btn_view_info_full') {
+            if (!m.viewData) {
+                await m.reply('❌ No media data found.');
+                return;
+            }
+            
+            const { type, quotedMsg, fileSize } = m.viewData;
+            let info = `📊 *Media Information*\n\n` +
+                       `Type: ${type}\n` +
+                       `Size: ${fileSize} MB\n`;
+            
+            if (type === 'image' && quotedMsg.imageMessage) {
+                info += `Dimensions: ${quotedMsg.imageMessage.width}x${quotedMsg.imageMessage.height}\n`;
+                info += `Caption: ${quotedMsg.imageMessage.caption || 'None'}\n`;
+            } else if (type === 'video' && quotedMsg.videoMessage) {
+                info += `Duration: ${quotedMsg.videoMessage.seconds}s\n`;
+                info += `Dimensions: ${quotedMsg.videoMessage.width}x${quotedMsg.videoMessage.height}\n`;
+                info += `Caption: ${quotedMsg.videoMessage.caption || 'None'}\n`;
+            } else if (type === 'audio' && quotedMsg.audioMessage) {
+                info += `Duration: ${quotedMsg.audioMessage.seconds}s\n`;
+                info += `PTT: ${quotedMsg.audioMessage.ptt ? 'Yes' : 'No'}\n`;
+            }
+            
+            info += `\nClick "Download" to save the media.`;
+            
+            await m.reply(info);
+            return;
+        }
+        
+        if (normalizedId === 'btn_view_help') {
+            const help = `👁️ *Media Viewer Help*\n\n` +
+                        `Usage:\n1. Reply to any media message\n2. Type .view\n3. Select an option\n\n` +
+                        `Features:\n• Download media\n• View media info\n• Extract media files`;
+            await m.reply(help);
+            return;
+        }
+        
+        if (normalizedId === 'btn_view_cancel') {
+            await m.reply('✅ Media viewer closed.');
+            delete m.viewData;
             return;
         }
         
@@ -600,7 +1124,7 @@ class BotRunner {
         await m.reply(`❌ Button action "${buttonId}" not implemented yet.\n\nTry using commands instead:\n• .ping\n• .menu\n• .owner`);
     }
 
-    // ==================== VCF EXPORT FUNCTION ====================
+    // ==================== HELPER FUNCTIONS ====================
     async exportVCF(m, sock, type, data) {
         try {
             const { metadata, participants, admins } = data;
@@ -632,15 +1156,13 @@ class BotRunner {
                 const name = participant.name || participant.notify || `User_${phoneNumber}`;
                 const isAdmin = participant.admin ? ';ADMIN' : '';
                 
-                vcfContent += `BEGIN:VCARD\nVERSION:3.0\nN:${name};;;;\nFN:${name}\nTEL;TYPE=CELL${isAdmin}:+${phoneNumber}\nNOTE:Exported from ${metadata.subject}\nEND:VCARD\n`;
+                vcfContent += `BEGIN:VCARD\nVERSION:3.0\nN:${name};;;;\nFN:${name}${isAdmin}\nTEL;TYPE=CELL:+${phoneNumber}\nEND:VCARD\n\n`;
             });
             
             const tempDir = path.join(__dirname, 'temp');
             await fs.mkdir(tempDir, { recursive: true });
             
-            const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-            const groupName = metadata.subject.replace(/[^a-z0-9]/gi, '_').substring(0, 30);
-            const filename = `contacts_${groupName}_${timestamp}.vcf`;
+            const filename = `contacts_${metadata.subject.replace(/[^a-z0-9]/gi, '_')}_${type}_${Date.now()}.vcf`;
             const filePath = path.join(tempDir, filename);
             
             await fs.writeFile(filePath, vcfContent, 'utf8');
@@ -649,12 +1171,12 @@ class BotRunner {
                 document: { url: filePath },
                 fileName: filename,
                 mimetype: 'text/vcard',
-                caption: `✅ *Contact Export Complete*\n\nGroup: ${metadata.subject}\nType: ${exportType}\nExported: ${exportParticipants.length} contacts\n\nPowered by CLOUD AI`
+                caption: `✅ *Contact Export Complete*\n\nGroup: ${metadata.subject}\nType: ${type}\nExported: ${exportParticipants.length} contacts\n\nPowered by CLOUD AI`
             }, { quoted: m });
             
             setTimeout(() => {
                 fs.unlink(filePath).catch(() => {});
-            }, 300000);
+            }, 30000);
             
         } catch (error) {
             console.error('VCF Export Error:', error);
@@ -662,7 +1184,6 @@ class BotRunner {
         }
     }
 
-    // ==================== TAG MEMBERS FUNCTION ====================
     async tagMembers(m, sock, type, data) {
         try {
             const { metadata, participants, admins, regularMembers } = data;
@@ -710,7 +1231,6 @@ class BotRunner {
         }
     }
 
-    // ==================== MEDIA UPLOAD FUNCTION ====================
     async handleMediaUpload(m, sock, service) {
         try {
             const { quotedMsg } = m.uploadData;
@@ -772,7 +1292,6 @@ class BotRunner {
         }
     }
 
-    // ==================== MEDIA ANALYSIS FUNCTION ====================
     async analyzeMedia(m, sock) {
         try {
             const { quotedMsg } = m.uploadData;
@@ -814,7 +1333,6 @@ class BotRunner {
         }
     }
 
-    // ==================== PRIVACY FUNCTIONS ====================
     async showPrivacyOptions(m, sock, settingType) {
         const options = {
             lastseen: ['all', 'contacts', 'none'],
@@ -892,7 +1410,6 @@ class BotRunner {
         }
     }
 
-    // ==================== HELPER FUNCTIONS ====================
     async handleBuiltinCommand(m, sock, cmd, args) {
         switch(cmd) {
             case 'ping':
