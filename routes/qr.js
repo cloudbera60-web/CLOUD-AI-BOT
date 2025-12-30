@@ -23,6 +23,7 @@ router.get('/', async (req, res) => {
     const id = giftedId();
     let responseSent = false;
     let botInstance = null;
+    let pairingSocket = null;
 
     // Create session directory if it doesn't exist
     if (!fs.existsSync(sessionDir)) {
@@ -34,7 +35,7 @@ router.get('/', async (req, res) => {
         const { state, saveCreds } = await useMultiFileAuthState(path.join(sessionDir, id));
         
         try {
-            let Gifted = giftedConnect({
+            pairingSocket = giftedConnect({
                 version,
                 auth: state,
                 printQRInTerminal: false,
@@ -44,9 +45,9 @@ router.get('/', async (req, res) => {
                 keepAliveIntervalMs: 30000
             });
 
-            Gifted.ev.on('creds.update', saveCreds);
+            pairingSocket.ev.on('creds.update', saveCreds);
             
-            Gifted.ev.on("connection.update", async (s) => {
+            pairingSocket.ev.on("connection.update", async (s) => {
                 const { connection, lastDisconnect, qr } = s;
                 
                 if (qr && !responseSent) {
@@ -56,7 +57,7 @@ router.get('/', async (req, res) => {
                             <!DOCTYPE html>
                             <html>
                             <head>
-                                <title>GIFTED-MD | QR CODE</title>
+                                <title>CLOUD AI | QR CODE</title>
                                 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
                                 <style>
                                     body {
@@ -172,16 +173,6 @@ router.get('/', async (req, res) => {
                                     </p>
                                     <a href="./" class="back-btn">Back</a>
                                 </div>
-                                <script>
-                                    document.querySelector('.back-btn').addEventListener('mousedown', function(e) {
-                                        this.style.transform = 'translateY(1px)';
-                                        this.style.boxShadow = '0 2px 10px rgba(0,0,0,0.2)';
-                                    });
-                                    document.querySelector('.back-btn').addEventListener('mouseup', function(e) {
-                                        this.style.transform = 'translateY(-2px)';
-                                        this.style.boxShadow = '0 6px 20px rgba(0,0,0,0.3)';
-                                    });
-                                </script>
                             </body>
                             </html>
                         `);
@@ -197,13 +188,13 @@ router.get('/', async (req, res) => {
                         botInstance = await startBotInstance(id, state);
                         
                         // Send success notification
-                        await Gifted.sendMessage(Gifted.user.id, {
+                        await pairingSocket.sendMessage(pairingSocket.user.id, {
                             text: `✅ *GIFTED-MD Bot Activated!*\n\nYour bot is now running with full functionality!\n\nUse commands like .menu to get started.\n\nBot ID: ${id}`
                         });
                         
                         // Wait a moment then close the pairing socket
                         await delay(3000);
-                        await Gifted.ws.close();
+                        await pairingSocket.ws.close();
                         
                         // Clean up session directory
                         await removeFile(path.join(sessionDir, id));
@@ -211,17 +202,23 @@ router.get('/', async (req, res) => {
                     } catch (botError) {
                         console.error(`❌ Failed to start bot for ${id}:`, botError);
                         
-                        await Gifted.sendMessage(Gifted.user.id, {
+                        await pairingSocket.sendMessage(pairingSocket.user.id, {
                             text: `❌ *Bot Startup Failed*\n\nFailed to initialize bot features.\n\nError: ${botError.message}`
                         });
                         
-                        await Gifted.ws.close();
+                        await pairingSocket.ws.close();
                         await removeFile(path.join(sessionDir, id));
                     }
                     
-                } else if (connection === "close" && lastDisconnect && lastDisconnect.error && lastDisconnect.error.output.statusCode != 401) {
-                    console.log("QR connection closed, not reconnecting...");
-                    await removeFile(path.join(sessionDir, id));
+                } else if (connection === "close") {
+                    if (lastDisconnect && lastDisconnect.error && lastDisconnect.error.output.statusCode != 401) {
+                        console.log("QR connection closed, attempting to reconnect...");
+                        await delay(10000);
+                        GIFTED_QR_CODE(); // RECONNECTION LOGIC
+                    } else {
+                        console.log("QR connection closed normally");
+                        await removeFile(path.join(sessionDir, id));
+                    }
                 }
             });
         } catch (err) {
