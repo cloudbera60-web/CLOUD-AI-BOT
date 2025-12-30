@@ -38,10 +38,10 @@ module.exports = async (m, sock) => {
               `*Select tagging option:*`,
         footer: 'CLOUD AI Group Management | Professional Tagging',
         buttons: [
-          { id: 'btn_tag_all_pro', text: '👥 Tag Everyone' },
-          { id: 'btn_tag_admins_pro', text: '👑 Tag Admins Only' },
+          { id: 'btn_tag_all', text: '👥 Tag Everyone' },
+          { id: 'btn_tag_admins', text: '👑 Tag Admins Only' },
           { id: 'btn_tag_regular', text: '👤 Tag Regular Members' },
-          { id: 'btn_tag_custom_msg', text: '✏️ Custom Message' },
+          { id: 'btn_tag_custom', text: '✏️ Custom Message' },
           { id: 'btn_tag_cancel', text: '❌ Cancel' }
         ]
       });
@@ -60,71 +60,3 @@ module.exports = async (m, sock) => {
     }
   }
 };
-
-// Tag handler function
-async function handleGroupTag(type, data, m, sock) {
-  try {
-    let targetParticipants = [];
-    let tagType = '';
-    
-    switch(type) {
-      case 'all':
-        targetParticipants = data.participants;
-        tagType = 'All Members';
-        break;
-      case 'admins':
-        targetParticipants = data.admins;
-        tagType = 'Administrators';
-        break;
-      case 'regular':
-        targetParticipants = data.regularMembers;
-        tagType = 'Regular Members';
-        break;
-      default:
-        return m.reply('❌ Invalid tag type.');
-    }
-    
-    if (targetParticipants.length === 0) {
-      return m.reply(`❌ No ${tagType.toLowerCase()} found to tag.`);
-    }
-    
-    // Show processing
-    await m.reply(`⏳ *Preparing Tag Operation*\n\n` +
-      `📊 **Target:** ${tagType}\n` +
-      `👥 **Count:** ${targetParticipants.length}\n` +
-      `🏷️ **Group:** ${data.metadata.subject}\n` +
-      `⏱️ **Status:** Processing...`);
-    
-    // Create mentions array
-    const mentions = targetParticipants.map(p => p.id);
-    
-    // Generate tag message
-    const currentTime = new Date().toLocaleTimeString('en-KE', { 
-      hour: '2-digit', 
-      minute: '2-digit',
-      timeZone: 'Africa/Nairobi'
-    });
-    
-    const tagMessage = `🔔 *${tagType.toUpperCase()} NOTIFICATION*\n\n` +
-                      `📢 **Announcement from:** @${m.sender.split('@')[0]}\n` +
-                      `🏷️ **Group:** ${data.metadata.subject}\n` +
-                      `👥 **Affected:** ${targetParticipants.length} members\n` +
-                      `🕐 **Time:** ${currentTime} (EAT)\n\n` +
-                      `*Please acknowledge this message:*\n\n` +
-                      mentions.map((mention, index) => 
-                        `@${mention.split('@')[0]}${(index + 1) % 5 === 0 ? '\n' : ' '}`
-                      ).join('') +
-                      `\n\n📌 *End of Notification*\n` +
-                      `✅ Powered by CLOUD AI Group Manager`;
-    
-    // Send tagged message
-    await sock.sendMessage(m.from, {
-      text: tagMessage,
-      mentions: mentions
-    }, { quoted: m });
-    
-  } catch (error) {
-    console.error('❌ Tag Operation Error:', error);
-    m.reply('❌ Failed to complete tagging operation. Please check permissions.');
-  }
-}
