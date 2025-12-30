@@ -1,0 +1,26 @@
+{
+  "vcf": {
+    "enabled": true,
+    "maxContacts": 1000,
+    "tempFileLifetime": 300
+  },
+  "view": {
+    "enabled": true,
+    "ownerOnly": true,
+    "maxFileSize": 10485760
+  },
+  "url": {
+    "enabled": true,
+    "services": ["tmpfiles", "catbox"],
+    "maxFileSize": 52428800
+  },
+  "tagall": {
+    "enabled": true,
+    "adminOnly": true,
+    "maxMembers": 500
+  },
+  "setprivacy": {
+    "enabled": true,
+    "ownerOnly": true
+  }
+}
