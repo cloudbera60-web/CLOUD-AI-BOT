@@ -10,12 +10,14 @@ module.exports = async (m, sock) => {
         return m.reply('❌ *Group Command Only*\nThis feature requires group context.');
       }
       
+      // Get group metadata
       const groupMetadata = await sock.groupMetadata(m.from);
       const participants = groupMetadata.participants;
+      
+      // Check if user is admin
       const participant = participants.find(p => p.id === m.sender);
       const botParticipant = participants.find(p => p.id === sock.user.id);
       
-      // Permission checks
       if (!participant?.admin) {
         return m.reply('🔒 *Admin Required*\nOnly group administrators can use this feature.');
       }
@@ -46,8 +48,8 @@ module.exports = async (m, sock) => {
         ]
       });
       
-      // Store data
-      m.groupManagerData = {
+      // Store data for button handlers
+      m.tagallData = {
         metadata: groupMetadata,
         participants: participants,
         admins: admins,
@@ -60,3 +62,53 @@ module.exports = async (m, sock) => {
     }
   }
 };
+
+// Export function for bot-runner.js to use
+async function tagMembers(m, sock, type, data) {
+  try {
+    const { metadata, participants, admins, regularMembers } = data;
+    let targetParticipants = [];
+    let tagType = '';
+    
+    switch(type) {
+      case 'all':
+        targetParticipants = participants;
+        tagType = 'All Members';
+        break;
+      case 'admins':
+        targetParticipants = admins;
+        tagType = 'Administrators';
+        break;
+      case 'regular':
+        targetParticipants = regularMembers;
+        tagType = 'Regular Members';
+        break;
+      default:
+        return m.reply('❌ Invalid tag type.');
+    }
+    
+    if (targetParticipants.length === 0) {
+      return m.reply(`❌ No ${tagType.toLowerCase()} found to tag.`);
+    }
+    
+    await m.reply(`⏳ Tagging ${targetParticipants.length} members...`);
+    
+    const mentions = targetParticipants.map(p => p.id);
+    const tagMessage = `🔔 *${tagType.toUpperCase()} NOTIFICATION*\n\n` +
+                      `Message from: @${m.sender.split('@')[0]}\n` +
+                      `Group: ${metadata.subject}\n\n` +
+                      mentions.map(p => `@${p.split('@')[0]}`).join(' ') +
+                      `\n\n🏷️ Powered by CLOUD AI`;
+    
+    await sock.sendMessage(m.from, {
+      text: tagMessage,
+      mentions: mentions
+    }, { quoted: m });
+    
+  } catch (error) {
+    console.error('Tag Error:', error);
+    await m.reply('❌ Error tagging members.');
+  }
+}
+
+module.exports.tagMembers = tagMembers;
