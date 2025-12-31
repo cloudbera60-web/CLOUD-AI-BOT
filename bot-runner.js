@@ -9,8 +9,6 @@ const fs = require('fs').promises;
 const fetch = require('node-fetch');
 const FormData = require('form-data');
 const { fileTypeFromBuffer } = require('file-type');
-const axios = require('axios');
-const yts = require('yt-search');
 
 class BotRunner {
     constructor(sessionId, authState) {
@@ -26,6 +24,7 @@ class BotRunner {
         this.connectionState = 'disconnected';
         this.lastActivity = new Date();
         this.userStates = new Map();
+        this.activeUploads = new Map();
     }
 
     async start() {
@@ -38,6 +37,7 @@ class BotRunner {
             this.connectionState = 'connecting';
             console.log(`🤖 Starting CLOUD AI bot for session: ${this.sessionId}`);
             
+            // Load session from DB if exists
             if (!this.authState.creds && database.isConnected) {
                 const savedSession = await database.getSession(this.sessionId);
                 if (savedSession) {
@@ -62,6 +62,7 @@ class BotRunner {
                 defaultQueryTimeoutMs: 0
             });
 
+            // Initialize global active bots registry
             global.activeBots = global.activeBots || {};
             global.activeBots[this.sessionId] = {
                 socket: this.socket,
@@ -72,12 +73,16 @@ class BotRunner {
 
             this.setupEventHandlers();
             
+            // Initialize plugins
+            await this.initializePlugins();
+            
             this.isRunning = true;
             this.reconnectAttempts = 0;
             
             console.log(`✅ CLOUD AI bot started successfully for session: ${this.sessionId}`);
             
-            this.sendWelcomeMessage().catch(console.error);
+            // Send welcome message to owner
+            await this.sendWelcomeMessage().catch(console.error);
             
             return this.socket;
             
@@ -88,9 +93,32 @@ class BotRunner {
         }
     }
 
+    async initializePlugins() {
+        try {
+            await pluginLoader.loadPlugins();
+            
+            // Check essential plugins
+            const essentialPlugins = ['menu', 'ping', 'owner'];
+            const loadedPlugins = Array.from(pluginLoader.plugins.keys());
+            
+            console.log(`📦 Plugins loaded: ${loadedPlugins.length}`);
+            console.log(`📋 Available plugins: ${loadedPlugins.join(', ')}`);
+            
+            // Verify essential plugins
+            const missingPlugins = essentialPlugins.filter(p => !loadedPlugins.includes(p));
+            if (missingPlugins.length > 0) {
+                console.warn(`⚠️ Missing essential plugins: ${missingPlugins.join(', ')}`);
+            }
+            
+        } catch (error) {
+            console.error('❌ Failed to initialize plugins:', error);
+        }
+    }
+
     setupEventHandlers() {
         const { socket } = this;
         
+        // Save credentials when updated
         socket.ev.on('creds.update', async (creds) => {
             try {
                 if (database.isConnected) {
@@ -102,6 +130,7 @@ class BotRunner {
             }
         });
 
+        // Handle connection updates
         socket.ev.on('connection.update', async (update) => {
             const { connection, lastDisconnect } = update;
             
@@ -111,6 +140,7 @@ class BotRunner {
                 console.log(`✅ CLOUD AI bot ${this.sessionId} connected successfully!`);
                 this.reconnectAttempts = 0;
                 
+                // Save session on successful connection
                 if (database.isConnected) {
                     await database.saveSession(this.sessionId, this.authState);
                 }
@@ -138,6 +168,7 @@ class BotRunner {
             }
         });
 
+        // Handle incoming messages
         socket.ev.on("messages.upsert", async (chatUpdate) => {
             try {
                 this.lastActivity = new Date();
@@ -232,6 +263,7 @@ class BotRunner {
                     }
                 }
                 
+                // Auto-reaction if enabled
                 if (!m.key.fromMe && m.message && process.env.AUTO_REACT === 'true') {
                     this.sendAutoReaction(m, socket).catch(() => {});
                 }
@@ -265,6 +297,23 @@ class BotRunner {
                 }
                 this.userStates.delete(userId);
                 break;
+                
+            case 'musicSelection':
+                const musicResults = userState.data?.results;
+                const selection = parseInt(m.body.trim());
+                
+                if (musicResults && !isNaN(selection) && selection >= 1 && selection <= musicResults.length) {
+                    const selectedVideo = musicResults[selection - 1];
+                    
+                    await m.reply(`🎵 Selected: ${selectedVideo.title}\n\nDownloading...`);
+                    
+                    const playPlugin = pluginLoader.plugins.get('play');
+                    if (playPlugin && playPlugin.downloadAndSendAudio) {
+                        await playPlugin.downloadAndSendAudio(m, sock, selectedVideo.videoId, 'high');
+                    }
+                }
+                this.userStates.delete(userId);
+                break;
         }
     }
 
@@ -283,673 +332,171 @@ class BotRunner {
         await m.React('✅').catch(() => {});
         
         // ==================== CORE BUTTONS ====================
-        if (normalizedId === 'btn_ping' || buttonId === 'ping' || normalizedId === 'btn_core_ping') {
-            const start = Date.now();
-            await m.reply(`🏓 Testing latency...`);
-            const latency = Date.now() - start;
-            
-            const wsPing = sock.ws?.ping || 'N/A';
-            
-            const status = `⚡ *CLOUD AI Performance Report*\n\n` +
-                          `⏱️ Response Time: ${latency}ms\n` +
-                          `📡 WebSocket Ping: ${wsPing}ms\n` +
-                          `🆔 Session: ${this.sessionId}\n` +
-                          `📊 Status: ${latency < 500 ? 'Optimal ⚡' : 'Normal 📈'}\n` +
-                          `🌐 Connection: ${this.connectionState}\n\n` +
-                          `_${new Date().toLocaleTimeString()}_`;
-            
-            await sock.sendMessage(m.from, { text: status }, { quoted: m });
+        if (normalizedId === 'btn_ping' || normalizedId === 'btn_core_ping') {
+            await this.handlePingButton(m, sock);
             return;
         }
         
-        if (normalizedId === 'btn_status' || buttonId === 'status' || normalizedId === 'btn_core_status' || normalizedId === 'btn_system_status') {
-            const uptime = this.getUptime();
-            const memoryUsage = (process.memoryUsage().heapUsed / 1024 / 1024).toFixed(2);
-            
-            // Get system information
-            const os = require('os');
-            const totalMemory = (os.totalmem() / 1024 / 1024 / 1024).toFixed(2);
-            const freeMemory = (os.freemem() / 1024 / 1024 / 1024).toFixed(2);
-            const platform = os.platform();
-            const arch = os.arch();
-            
-            const status = `📊 *CLOUD AI System Status*\n\n` +
-                          `🆔 Session: ${this.sessionId}\n` +
-                          `🔌 State: ${this.connectionState}\n` +
-                          `⏱️ Uptime: ${uptime}\n` +
-                          `🔄 Reconnects: ${this.reconnectAttempts}/${this.maxReconnectAttempts}\n` +
-                          `📅 Last Activity: ${this.lastActivity.toLocaleTimeString()}\n` +
-                          `💾 Memory: ${memoryUsage} MB\n` +
-                          `💿 Total RAM: ${totalMemory} GB\n` +
-                          `📦 Free RAM: ${freeMemory} GB\n` +
-                          `🖥️ Platform: ${platform} ${arch}\n` +
-                          `🔌 Plugins: ${pluginLoader.plugins.size} loaded\n` +
-                          `🌐 Node.js: ${process.version}`;
-            
-            await sendButtons(sock, m.from, {
-                title: '📊 System Status',
-                text: status,
-                footer: 'Real-time system metrics',
-                buttons: [
-                    { id: 'btn_ping', text: '🏓 Ping Test' },
-                    { id: 'btn_plugins', text: '📦 Plugins' },
-                    { id: 'btn_menu_back', text: '🔙 Back' }
-                ]
-            });
+        if (normalizedId === 'btn_status' || normalizedId === 'btn_system_status') {
+            await this.handleStatusButton(m, sock);
             return;
         }
         
-        if (normalizedId === 'btn_plugins' || buttonId === 'plugins' || normalizedId === 'btn_core_plugins') {
-            const plugins = Array.from(pluginLoader.plugins.keys());
-            const pluginList = plugins.length > 0 
-                ? plugins.map(p => `• .${p}`).join('\n')
-                : 'No plugins loaded';
-            await m.reply(`📦 *Loaded Plugins (${plugins.length})*\n\n${pluginList}`);
+        if (normalizedId === 'btn_plugins' || normalizedId === 'btn_core_plugins') {
+            await this.handlePluginsButton(m, sock);
             return;
         }
         
-        if (normalizedId === 'btn_menu' || buttonId === 'menu' || normalizedId === 'btn_core_menu') {
-            const menuPlugin = pluginLoader.plugins.get('menu');
-            if (menuPlugin) {
-                m.body = '.menu';
-                await menuPlugin(m, sock);
-            } else {
-                await m.reply('❌ Menu plugin not found.');
-            }
+        if (normalizedId === 'btn_menu' || normalizedId === 'btn_core_menu') {
+            await this.handleMenuButton(m, sock);
+            return;
+        }
+        
+        if (normalizedId === 'btn_owner' || normalizedId === 'btn_core_owner') {
+            await this.handleOwnerButton(m, sock);
             return;
         }
         
         // ==================== MENU CATEGORY BUTTONS ====================
-        if (normalizedId === 'btn_menu_tools' || normalizedId === 'btn_menu') {
-            await sendButtons(sock, m.from, {
-                title: '🛠️ Tools Menu',
-                text: `*Available Tools:*\n\n• .ping - Check bot speed\n• .vcf - Export group contacts\n• .url - Upload media to cloud\n• .logo - Generate logos\n• .play - Download music\n• .view - Media viewer`,
-                footer: 'Select a tool or use command',
-                buttons: [
-                    { id: 'btn_ping', text: '🏓 Ping' },
-                    { id: 'btn_vcf', text: '📇 VCF Export' },
-                    { id: 'btn_url', text: '🌐 URL Upload' },
-                    { id: 'btn_logo_menu', text: '🎨 Logo Maker' },
-                    { id: 'btn_play', text: '🎵 Music' },
-                    { id: 'btn_view', text: '👁️ View Media' },
-                    { id: 'btn_menu_back', text: '🔙 Back' }
-                ]
-            });
+        if (normalizedId === 'btn_menu_tools') {
+            await this.handleToolsMenu(m, sock);
             return;
         }
         
         if (normalizedId === 'btn_menu_media') {
-            await sendButtons(sock, m.from, {
-                title: '📁 Media Menu',
-                text: `*Media Tools:*\n\n• .url - Upload files\n• .view - View/download media\n• .play - Music downloader\n• Image editing tools\n• Video tools\n• Audio tools`,
-                footer: 'Media processing tools',
-                buttons: [
-                    { id: 'btn_url', text: '🌐 Upload' },
-                    { id: 'btn_view', text: '👁️ View Media' },
-                    { id: 'btn_play', text: '🎵 Music' },
-                    { id: 'btn_menu_back', text: '🔙 Back' }
-                ]
-            });
+            await this.handleMediaMenu(m, sock);
             return;
         }
         
-        if (normalizedId === 'btn_menu_group' || normalizedId === 'btn_group_tagall') {
-            if (!m.isGroup) {
-                await m.reply('❌ Group features only work in groups.');
-                return;
-            }
-            
-            await sendButtons(sock, m.from, {
-                title: '👥 Group Menu',
-                text: `*Group Management:*\n\n• .tagall - Tag all members\n• .vcf - Export contacts\n• Group info\n• Admin tools\n• Member management\n• Settings`,
-                footer: 'Group administration tools',
-                buttons: [
-                    { id: 'btn_tagall', text: '🏷️ Tag All' },
-                    { id: 'btn_vcf', text: '📇 Export Contacts' },
-                    { id: 'btn_menu_back', text: '🔙 Back' }
-                ]
-            });
+        if (normalizedId === 'btn_menu_group') {
+            await this.handleGroupMenu(m, sock);
             return;
         }
         
         if (normalizedId === 'btn_menu_fun') {
-            await sendButtons(sock, m.from, {
-                title: '🎮 Fun Menu',
-                text: `*Fun & Games:*\n\n• .logo - Logo generator\n• Sticker maker\n• Games\n• AI chat\n• Entertainment\n• Random tools`,
-                footer: 'Entertainment features',
-                buttons: [
-                    { id: 'btn_logo_menu', text: '🎨 Logo Maker' },
-                    { id: 'btn_menu_back', text: '🔙 Back' }
-                ]
-            });
+            await this.handleFunMenu(m, sock);
             return;
         }
         
         if (normalizedId === 'btn_menu_owner') {
-            // Owner verification
-            const userId = m.sender.split('@')[0];
-            const ownerNumbers = ['254116763755', '254743982206'];
-            
-            if (!ownerNumbers.includes(userId)) {
-                await m.reply('🔒 *Owner Access Required*\nThis menu is restricted to BERA TECH.');
-                return;
-            }
-            
-            await sendButtons(sock, m.from, {
-                title: '👑 Owner Menu',
-                text: `*Owner Tools:*\n\n• .mode - Change bot mode\n• .autoreact - Auto reactions\n• .autotyping - Fake typing\n• .autorecording - Recording status\n• .privacy - Privacy settings\n• Bot controls`,
-                footer: 'Owner-only commands',
-                buttons: [
-                    { id: 'btn_mode_info', text: '⚙️ Bot Mode' },
-                    { id: 'btn_priv_visibility', text: '🔐 Privacy' },
-                    { id: 'btn_autoreact', text: '💬 Auto React' },
-                    { id: 'btn_autotyping', text: '⌨️ Auto Typing' },
-                    { id: 'btn_menu_back', text: '🔙 Back' }
-                ]
-            });
+            await this.handleOwnerMenu(m, sock);
             return;
         }
         
         if (normalizedId === 'btn_menu_back') {
-            // Go back to main menu
-            const menuPlugin = pluginLoader.plugins.get('menu');
-            if (menuPlugin) {
-                m.body = '.menu';
-                await menuPlugin(m, sock);
-            } else {
-                // Fallback to main menu buttons
-                await sendButtons(sock, m.from, {
-                    title: '☁️ CLOUD AI Menu',
-                    text: 'Main Menu - Select a category:',
-                    footer: 'Powered by BERA TECH',
-                    buttons: [
-                        { id: 'btn_menu_tools', text: '🛠️ Tools' },
-                        { id: 'btn_menu_media', text: '📁 Media' },
-                        { id: 'btn_menu_group', text: '👥 Group' },
-                        { id: 'btn_menu_fun', text: '🎮 Fun' },
-                        { id: 'btn_menu_owner', text: '👑 Owner' },
-                        { id: 'btn_system_status', text: '📊 Status' }
-                    ]
-                });
-            }
+            await this.handleBackButton(m, sock);
             return;
         }
         
-        // ==================== LOGO MENU SYSTEM ====================
+        // ==================== LOGO BUTTONS ====================
         if (normalizedId === 'btn_logo_menu') {
-            // Logo category menu
-            await sendButtons(sock, m.from, {
-                title: '🎨 Logo Generator',
-                text: `*Select logo category:*\n\nOr type directly:\n.logo [style] [text]\nExample: .logo glow CLOUD AI`,
-                footer: 'Choose a category or type manually',
-                buttons: [
-                    { id: 'btn_logo_popular', text: '🎨 Popular' },
-                    { id: 'btn_logo_water', text: '🌊 Water' },
-                    { id: 'btn_logo_glow', text: '✨ Glow' },
-                    { id: 'btn_logo_creative', text: '🎭 Creative' },
-                    { id: 'btn_logo_backgrounds', text: '🌌 Backgrounds' },
-                    { id: 'btn_logo_special', text: '🎉 Special' },
-                    { id: 'btn_menu_back', text: '🔙 Back' }
-                ]
-            });
-            return;
-        }
-        
-        // Logo sub-categories
-        const logoCategories = {
-            'btn_logo_popular': ['blackpink', 'glow', 'naruto', 'hacker', 'luxury', 'avatar'],
-            'btn_logo_water': ['water', 'water3d', 'underwater', 'wetglass', 'bulb'],
-            'btn_logo_glow': ['glossysilver', 'gold', 'textlight', 'bokeh', 'neon'],
-            'btn_logo_creative': ['graffiti', 'paint', 'typography', 'rotation', 'digitalglitch'],
-            'btn_logo_backgrounds': ['galaxy', 'blood', 'snow', 'thunder', 'sand', 'wall'],
-            'btn_logo_special': ['birthdaycake', 'halloween', 'valentine', 'pubg', 'zodiac', 'team']
-        };
-        
-        if (Object.keys(logoCategories).includes(normalizedId)) {
-            const styles = logoCategories[normalizedId];
-            const categoryName = {
-                'btn_logo_popular': 'Popular',
-                'btn_logo_water': 'Water Effects',
-                'btn_logo_glow': 'Glow Effects',
-                'btn_logo_creative': 'Creative',
-                'btn_logo_backgrounds': 'Backgrounds',
-                'btn_logo_special': 'Special'
-            }[normalizedId];
-            
-            let buttons = styles.map(style => ({
-                id: `btn_logo_select_${style}`,
-                text: style.charAt(0).toUpperCase() + style.slice(1)
-            }));
-            buttons.push({ id: 'btn_logo_menu', text: '🔙 Back' });
-            
-            await sendButtons(sock, m.from, {
-                title: `🎨 ${categoryName} Logos`,
-                text: `*Select a style:*\n\nThen type:\n\`\`\`.logo [style] [your text]\`\`\`\n\nExample:\n.logo ${styles[0]} CLOUD AI`,
-                footer: 'Click style, then type command',
-                buttons: buttons.slice(0, 6) // WhatsApp limit
-            });
+            await this.handleLogoMenu(m, sock);
             return;
         }
         
         if (normalizedId.startsWith('btn_logo_select_')) {
             const style = normalizedId.replace('btn_logo_select_', '');
-            await m.reply(`🎨 *Logo Style Selected:* ${style}\n\nNow type:\n\`\`\`.logo ${style} YOUR TEXT HERE\`\`\`\n\nExample:\n\`\`\`.logo ${style} CLOUD AI BOT\`\`\`\n\nTip: You can add emojis too!`);
+            await m.reply(`🎨 *Logo Style Selected:* ${style}\n\nNow type:\n\`\`\`.logo ${style} YOUR TEXT HERE\`\`\`\n\nExample:\n\`\`\`.logo ${style} CLOUD AI BOT\`\`\``);
             return;
         }
         
-        // ==================== OWNER BUTTONS ====================
-        if (normalizedId === 'btn_owner' || normalizedId === 'btn_core_owner' || buttonId === 'owner') {
-            await sendInteractiveMessage(sock, m.from, {
-                title: '👑 BERA TECH Contact Suite',
-                text: 'Select contact method:',
-                footer: 'CLOUD AI Professional Contact',
-                interactiveButtons: [
-                    {
-                        name: 'cta_call',
-                        buttonParamsJson: JSON.stringify({
-                            display_text: '📞 Call Primary (+254116763755)',
-                            phone_number: '+254116763755'
-                        })
-                    },
-                    {
-                        name: 'cta_call',
-                        buttonParamsJson: JSON.stringify({
-                            display_text: '📞 Call Secondary (+254743982206)',
-                            phone_number: '+254743982206'
-                        })
-                    },
-                    {
-                        name: 'cta_url',
-                        buttonParamsJson: JSON.stringify({
-                            display_text: '✉️ Send Email',
-                            url: 'mailto:beratech00@gmail.com'
-                        })
-                    },
-                    {
-                        name: 'cta_url',
-                        buttonParamsJson: JSON.stringify({
-                            display_text: '💬 WhatsApp Chat',
-                            url: 'https://wa.me/254116763755'
-                        })
-                    }
-                ]
-            });
-            return;
-        }
+        // Logo category buttons
+        const logoCategories = {
+            'btn_logo_popular': ['blackpink', 'glow', 'naruto', 'hacker', 'luxury', 'avatar'],
+            'btn_logo_water': ['water', 'water3d', 'underwater', 'wetglass', 'bulb'],
+            'btn_logo_glow': ['glossysilver', 'gold', 'textlight', 'bokeh'],
+            'btn_logo_creative': ['graffiti', 'paint', 'typography', 'rotation', 'digitalglitch'],
+            'btn_logo_backgrounds': ['galaxy', 'blood', 'snow', 'thunder', 'sand', 'wall'],
+            'btn_logo_special': ['birthdaycake', 'halloween', 'valentine', 'pubg', 'zodiac', 'team']
+        };
         
-        // Owner feature buttons
-        if (normalizedId === 'btn_autoreact') {
-            const userId = m.sender.split('@')[0];
-            const ownerNumbers = ['254116763755', '254743982206'];
-            
-            if (!ownerNumbers.includes(userId)) {
-                await m.reply('🔒 Owner access required.');
-                return;
-            }
-            
-            await sendButtons(sock, m.from, {
-                title: '💬 Auto-Reaction',
-                text: `*Auto-Reaction Settings*\n\nBot will automatically react to messages.\n\nCurrent: ${process.env.AUTO_REACT === 'true' ? 'ON ✅' : 'OFF ❌'}`,
-                footer: 'Owner only feature',
-                buttons: [
-                    { id: 'btn_autoreact_on', text: '✅ Turn ON' },
-                    { id: 'btn_autoreact_off', text: '❌ Turn OFF' },
-                    { id: 'btn_menu_owner', text: '🔙 Back' }
-                ]
-            });
-            return;
-        }
-        
-        if (normalizedId === 'btn_autotyping') {
-            const userId = m.sender.split('@')[0];
-            const ownerNumbers = ['254116763755', '254743982206'];
-            
-            if (!ownerNumbers.includes(userId)) {
-                await m.reply('🔒 Owner access required.');
-                return;
-            }
-            
-            const config = require('../config.cjs');
-            await sendButtons(sock, m.from, {
-                title: '⌨️ Auto-Typing',
-                text: `*Auto-Typing Settings*\n\nBot will show fake typing indicators.\n\nCurrent: ${config.AUTO_TYPING ? 'ON ✅' : 'OFF ❌'}`,
-                footer: 'Owner only feature',
-                buttons: [
-                    { id: 'btn_autotyping_on', text: '✅ Turn ON' },
-                    { id: 'btn_autotyping_off', text: '❌ Turn OFF' },
-                    { id: 'btn_menu_owner', text: '🔙 Back' }
-                ]
-            });
-            return;
-        }
-        
-        if (normalizedId === 'btn_autoreact_on') {
-            const userId = m.sender.split('@')[0];
-            const ownerNumbers = ['254116763755', '254743982206'];
-            
-            if (!ownerNumbers.includes(userId)) {
-                await m.reply('🔒 Owner access required.');
-                return;
-            }
-            
-            process.env.AUTO_REACT = 'true';
-            await m.reply('✅ Auto-reaction turned ON\nBot will now react to messages automatically.');
-            return;
-        }
-        
-        if (normalizedId === 'btn_autoreact_off') {
-            const userId = m.sender.split('@')[0];
-            const ownerNumbers = ['254116763755', '254743982206'];
-            
-            if (!ownerNumbers.includes(userId)) {
-                await m.reply('🔒 Owner access required.');
-                return;
-            }
-            
-            process.env.AUTO_REACT = 'false';
-            await m.reply('❌ Auto-reaction turned OFF');
-            return;
-        }
-        
-        if (normalizedId === 'btn_autotyping_on') {
-            const userId = m.sender.split('@')[0];
-            const ownerNumbers = ['254116763755', '254743982206'];
-            
-            if (!ownerNumbers.includes(userId)) {
-                await m.reply('🔒 Owner access required.');
-                return;
-            }
-            
-            const config = require('../config.cjs');
-            config.AUTO_TYPING = true;
-            await m.reply('⌨️ Auto-typing turned ON\nBot will show random typing indicators.');
-            return;
-        }
-        
-        if (normalizedId === 'btn_autotyping_off') {
-            const userId = m.sender.split('@')[0];
-            const ownerNumbers = ['254116763755', '254743982206'];
-            
-            if (!ownerNumbers.includes(userId)) {
-                await m.reply('🔒 Owner access required.');
-                return;
-            }
-            
-            const config = require('../config.cjs');
-            config.AUTO_TYPING = false;
-            await m.reply('🚫 Auto-typing turned OFF');
-            return;
-        }
-        
-        if (normalizedId === 'btn_mode_info') {
-            const userId = m.sender.split('@')[0];
-            const ownerNumbers = ['254116763755', '254743982206'];
-            
-            if (!ownerNumbers.includes(userId)) {
-                await m.reply('🔒 Owner access required.');
-                return;
-            }
-            
-            const config = require('../config.cjs');
-            const currentMode = config.BOT_MODE || 'private';
-            const info = `⚙️ *Bot Mode Information*\n\n` +
-                        `Current: ${currentMode.toUpperCase()}\n\n` +
-                        `🌐 *Public Mode:*\n• Everyone can use commands\n• All features available\n\n` +
-                        `🔒 *Private Mode:*\n• Only owner can use commands\n• Restricted access`;
-            
-            await sendButtons(sock, m.from, {
-                title: '⚙️ Bot Mode',
-                text: info,
-                footer: 'Owner only configuration',
-                buttons: [
-                    { id: 'btn_mode_public', text: '🌐 Set Public' },
-                    { id: 'btn_mode_private', text: '🔒 Set Private' },
-                    { id: 'btn_menu_owner', text: '🔙 Back' }
-                ]
-            });
-            return;
-        }
-        
-        if (normalizedId === 'btn_mode_public') {
-            const userId = m.sender.split('@')[0];
-            const ownerNumbers = ['254116763755', '254743982206'];
-            
-            if (!ownerNumbers.includes(userId)) {
-                await m.reply('🔒 Owner access required.');
-                return;
-            }
-            
-            const config = require('../config.cjs');
-            config.BOT_MODE = 'public';
-            process.env.BOT_MODE = 'public';
-            await m.reply(`🌐 *Public Mode ACTIVATED*\n\nEveryone can now use bot commands.`);
-            return;
-        }
-        
-        if (normalizedId === 'btn_mode_private') {
-            const userId = m.sender.split('@')[0];
-            const ownerNumbers = ['254116763755', '254743982206'];
-            
-            if (!ownerNumbers.includes(userId)) {
-                await m.reply('🔒 Owner access required.');
-                return;
-            }
-            
-            const config = require('../config.cjs');
-            config.BOT_MODE = 'private';
-            process.env.BOT_MODE = 'private';
-            await m.reply(`🔒 *Private Mode ACTIVATED*\n\nOnly owner can use bot commands.`);
+        if (logoCategories[normalizedId]) {
+            await this.handleLogoCategory(m, sock, normalizedId, logoCategories[normalizedId]);
             return;
         }
         
         // ==================== VCF BUTTONS ====================
-        if (normalizedId === 'btn_vcf' || normalizedId === 'btn_tools_vcf') {
-            if (!m.isGroup) {
-                await m.reply('❌ VCF export only works in groups.');
-                return;
-            }
-            
-            // Trigger the vcf command
-            const vcfPlugin = pluginLoader.plugins.get('vcf');
-            if (vcfPlugin) {
-                m.body = '.vcf';
-                await vcfPlugin(m, sock);
-            } else {
-                await m.reply('❌ VCF plugin not found.');
-            }
+        if (normalizedId === 'btn_vcf') {
+            await this.handleVcfButton(m, sock);
             return;
         }
         
-        if (normalizedId === 'btn_vcf_all_pro' || normalizedId === 'btn_vcf_all') {
-            if (!m.vcfData && !m.exportData) {
-                await m.reply('❌ Please run .vcf command first.');
-                return;
-            }
-            
-            const data = m.vcfData || m.exportData;
-            await this.exportVCF(m, sock, 'all', data);
+        if (normalizedId === 'btn_vcf_all') {
+            await this.handleVcfExport(m, sock, 'all');
             return;
         }
         
-        if (normalizedId === 'btn_vcf_admins_pro' || normalizedId === 'btn_vcf_admins') {
-            if (!m.vcfData && !m.exportData) {
-                await m.reply('❌ Please run .vcf command first.');
-                return;
-            }
-            
-            const data = m.vcfData || m.exportData;
-            await this.exportVCF(m, sock, 'admins', data);
+        if (normalizedId === 'btn_vcf_admins') {
+            await this.handleVcfExport(m, sock, 'admins');
             return;
         }
         
         if (normalizedId === 'btn_vcf_custom') {
-            await m.reply('⚙️ Custom selection feature coming soon!\n\nUse: .vcf for group contact export');
+            await m.reply('⚙️ Custom VCF selection - Coming soon!\n\nUse: .vcf for group contact export');
             return;
         }
         
-        if (normalizedId === 'btn_vcf_cancel' || normalizedId === 'btn_core_cancel') {
+        if (normalizedId === 'btn_vcf_cancel') {
             await m.reply('✅ VCF export cancelled.');
             delete m.vcfData;
-            delete m.exportData;
             return;
         }
         
         // ==================== TAGALL BUTTONS ====================
         if (normalizedId === 'btn_tagall') {
-            if (!m.isGroup) {
-                await m.reply('❌ Tagall only works in groups.');
-                return;
-            }
-            
-            // Trigger the tagall command
-            const tagallPlugin = pluginLoader.plugins.get('tagall');
-            if (tagallPlugin) {
-                m.body = '.tagall';
-                await tagallPlugin(m, sock);
-            } else {
-                await m.reply('❌ Tagall plugin not found.');
-            }
+            await this.handleTagallButton(m, sock);
             return;
         }
         
-        if (normalizedId === 'btn_tag_all_pro' || normalizedId === 'btn_tag_all') {
-            if (!m.tagallData && !m.groupManagerData) {
-                await m.reply('❌ Please run .tagall command first.');
-                return;
-            }
-            
-            const data = m.tagallData || m.groupManagerData;
-            await this.tagMembers(m, sock, 'all', data);
+        if (normalizedId === 'btn_tag_all') {
+            await this.handleTagMembers(m, sock, 'all');
             return;
         }
         
-        if (normalizedId === 'btn_tag_admins_pro' || normalizedId === 'btn_tag_admins') {
-            if (!m.tagallData && !m.groupManagerData) {
-                await m.reply('❌ Please run .tagall command first.');
-                return;
-            }
-            
-            const data = m.tagallData || m.groupManagerData;
-            await this.tagMembers(m, sock, 'admins', data);
+        if (normalizedId === 'btn_tag_admins') {
+            await this.handleTagMembers(m, sock, 'admins');
             return;
         }
         
         if (normalizedId === 'btn_tag_regular') {
-            if (!m.groupManagerData) {
-                await m.reply('❌ Please run .tagall command first.');
-                return;
-            }
-            await this.tagMembers(m, sock, 'regular', m.groupManagerData);
+            await this.handleTagMembers(m, sock, 'regular');
             return;
         }
         
-        if (normalizedId === 'btn_tag_custom_msg' || normalizedId === 'btn_tag_custom') {
-            if (!m.tagallData && !m.groupManagerData) {
-                await m.reply('❌ Please run .tagall command first.');
-                return;
-            }
-            
-            const data = m.tagallData || m.groupManagerData;
-            await m.reply('✏️ Please type your custom message for tagging:');
-            this.userStates.set(m.sender, {
-                waitingFor: 'customTagMessage',
-                data: { participants: data.metadata.participants }
-            });
+        if (normalizedId === 'btn_tag_custom') {
+            await this.handleTagCustom(m, sock);
             return;
         }
         
         if (normalizedId === 'btn_tag_cancel') {
             await m.reply('✅ Tag operation cancelled.');
             delete m.tagallData;
-            delete m.groupManagerData;
             return;
         }
         
         // ==================== URL/UPLOAD BUTTONS ====================
-        if (normalizedId === 'btn_url' || buttonId === 'url') {
-            if (!m.quoted) {
-                await sendButtons(sock, m.from, {
-                    title: '🌐 Media Upload',
-                    text: `*How to use:*\n1. Reply to any media\n2. Click "Upload" button\n3. Select service\n\nOr type: .url`,
-                    footer: 'Media hosting service',
-                    buttons: [
-                        { id: 'btn_url_tutorial', text: '📚 Tutorial' },
-                        { id: 'btn_url_formats', text: '📋 Formats' },
-                        { id: 'btn_menu_back', text: '🔙 Back' }
-                    ]
-                });
-                return;
-            }
-            
-            // Trigger the url command
-            const urlPlugin = pluginLoader.plugins.get('url');
-            if (urlPlugin) {
-                m.body = '.url';
-                await urlPlugin(m, sock);
-            } else {
-                await m.reply('❌ URL plugin not found.');
-            }
-            return;
-        }
-        
-        if (normalizedId === 'btn_url_tutorial') {
-            const tutorial = `📚 *Media Upload Tutorial*\n\n` +
-                            `1. *Reply* to any media (image/video/audio/document)\n` +
-                            `2. Type *${process.env.BOT_PREFIX || '.'}url*\n` +
-                            `3. Select upload service\n` +
-                            `4. Get shareable link\n\n` +
-                            `📁 *Max Size:* 50MB\n` +
-                            `🌐 *Supported:* Images, Videos, Audio, Documents`;
-            await m.reply(tutorial);
-            return;
-        }
-        
-        if (normalizedId === 'btn_url_formats') {
-            const formats = `📋 *Supported Formats*\n\n` +
-                           `🖼️ *Images:* JPG, PNG, GIF, WebP\n` +
-                           `🎥 *Videos:* MP4, MOV, AVI, MKV\n` +
-                           `🎵 *Audio:* MP3, M4A, OGG, WAV\n` +
-                           `📄 *Documents:* PDF, DOC, TXT, ZIP\n` +
-                           `📁 *Max Size:* 50MB\n` +
-                           `⚡ *Fast Upload:* Instant processing`;
-            await m.reply(formats);
+        if (normalizedId === 'btn_url') {
+            await this.handleUrlButton(m, sock);
             return;
         }
         
         if (normalizedId === 'btn_url_tmpfiles') {
-            if (!m.uploadData) {
-                await m.reply('❌ Please reply to media first with .url');
-                return;
-            }
             await this.handleMediaUpload(m, sock, 'tmpfiles');
             return;
         }
         
         if (normalizedId === 'btn_url_catbox') {
-            if (!m.uploadData) {
-                await m.reply('❌ Please reply to media first with .url');
-                return;
-            }
             await this.handleMediaUpload(m, sock, 'catbox');
             return;
         }
         
         if (normalizedId === 'btn_url_analysis') {
-            if (!m.uploadData) {
-                await m.reply('❌ Please reply to media first with .url');
-                return;
-            }
             await this.analyzeMedia(m, sock);
             return;
         }
         
-        if (normalizedId === 'btn_url_copy') {
-            await m.reply('📋 Copy URL feature - coming soon!\n\nFor now, long-press the URL link to copy.');
-            return;
-        }
-        
-        if (normalizedId === 'btn_url_new') {
-            await m.reply('🔄 For new upload, reply to another media with .url');
+        if (normalizedId === 'btn_url_tutorial') {
+            await m.reply(`📚 *Media Upload Tutorial*\n\n1. Reply to any media\n2. Type .url\n3. Select service\n4. Get shareable link\n\n📁 Max Size: 50MB\n🌐 Supported: Images, Videos, Audio, Documents`);
             return;
         }
         
@@ -960,132 +507,79 @@ class BotRunner {
         }
         
         // ==================== MUSIC BUTTONS ====================
-        if (normalizedId === 'btn_play' || normalizedId === 'btn_music_play' || buttonId === 'play') {
-            await sendButtons(sock, m.from, {
-                title: '🎵 Music Center',
-                text: 'Search for music or browse categories:',
-                footer: 'CLOUD AI Music Player',
-                buttons: [
-                    { id: 'btn_music_search', text: '🔍 Search Music' },
-                    { id: 'btn_music_pop', text: '🎤 Pop Hits' },
-                    { id: 'btn_music_hiphop', text: '🎧 Hip Hop' },
-                    { id: 'btn_music_afro', text: '🌍 Afro Beats' }
-                ]
-            });
+        if (normalizedId === 'btn_play') {
+            await this.handlePlayButton(m, sock);
             return;
         }
         
         if (normalizedId === 'btn_music_search') {
-            await m.reply('🎵 Please type: `.play song name` to search for music');
+            await m.reply('🎵 *Music Search*\n\nType: `.play [song name or artist]`\n\nExamples:\n• .play drake\n• .play shape of you\n• .play afrobeat mix');
+            return;
+        }
+        
+        if (normalizedId === 'btn_music_pop') {
+            await m.reply('🎤 *Popular Music*\n\nTry these searches:\n• .play taylor swift\n• .play ed sheeran\n• .play ariana grande\n• .play weekend\n• .play drake latest');
+            return;
+        }
+        
+        if (normalizedId === 'btn_music_hiphop') {
+            await m.reply('🎧 *Hip Hop/Rap*\n\nTry these searches:\n• .play kendrick lamar\n• .play travis scott\n• .play kanye west\n• .play j cole\n• .play eminem');
+            return;
+        }
+        
+        if (normalizedId === 'btn_music_afro') {
+            await m.reply('🌍 *Afro Beats*\n\nTry these searches:\n• .play burna boy\n• .play wizkid\n• .play davido\n• .play tems\n• .play afrobeats mix');
             return;
         }
         
         if (normalizedId === 'btn_music_help') {
-            const help = `🎵 *Music Player Help*\n\n` +
-                        `• .play [song name] - Search and download music\n` +
-                        `• Click buttons for quick access\n` +
-                        `• Supported: YouTube music\n` +
-                        `• High quality audio`;
-            await m.reply(help);
+            await m.reply(`🎵 *Music Player Help*\n\n🔍 How to use:\n• .play [song name] - Search and download\n• Click buttons for quick searches\n• Select quality when prompted\n\n⚡ Features:\n• YouTube music download\n• High quality audio\n• Fast processing`);
+            return;
+        }
+        
+        // Handle play download buttons
+        if (normalizedId.startsWith('btn_play_download_')) {
+            const parts = normalizedId.split('_');
+            if (parts.length >= 5) {
+                const videoId = parts[3];
+                const quality = parts[4];
+                await this.handleMusicDownload(m, sock, videoId, quality);
+            }
+            return;
+        }
+        
+        // Handle play info buttons
+        if (normalizedId.startsWith('btn_play_info_')) {
+            const videoId = normalizedId.replace('btn_play_info_', '');
+            await this.handleMusicInfo(m, sock, videoId);
+            return;
+        }
+        
+        if (normalizedId === 'btn_play_cancel') {
+            await m.reply('✅ Music search cancelled.');
+            delete m.playData;
             return;
         }
         
         // ==================== VIEW BUTTONS ====================
-        if (normalizedId === 'btn_view' || buttonId === 'view') {
-            // Trigger the view command
-            const viewPlugin = pluginLoader.plugins.get('view');
-            if (viewPlugin) {
-                m.body = '.view';
-                await viewPlugin(m, sock);
-            } else {
-                await m.reply('❌ View plugin not found.');
-            }
+        if (normalizedId === 'btn_view') {
+            await this.handleViewButton(m, sock);
             return;
         }
         
         if (normalizedId === 'btn_view_download') {
-            if (!m.viewData) {
-                await m.reply('❌ No media data found.');
-                return;
-            }
-            
-            const { buffer, type, quotedMsg, fileSize } = m.viewData;
-            
-            try {
-                if (type === 'image') {
-                    await sock.sendMessage(m.from, {
-                        image: buffer,
-                        caption: `📷 Downloaded via CLOUD AI\nSize: ${fileSize} MB`
-                    }, { quoted: m });
-                } else if (type === 'video') {
-                    await sock.sendMessage(m.from, {
-                        video: buffer,
-                        caption: `🎥 Downloaded via CLOUD AI\nSize: ${fileSize} MB`,
-                        mimetype: 'video/mp4'
-                    }, { quoted: m });
-                } else if (type === 'audio') {
-                    const mimetype = quotedMsg.audioMessage?.mimetype || 'audio/mp4';
-                    await sock.sendMessage(m.from, {
-                        audio: buffer,
-                        mimetype: mimetype,
-                        ptt: false
-                    }, { quoted: m });
-                } else if (type === 'document') {
-                    const filename = quotedMsg.documentMessage?.fileName || `download_${Date.now()}.${type}`;
-                    await sock.sendMessage(m.from, {
-                        document: buffer,
-                        fileName: filename,
-                        mimetype: quotedMsg.documentMessage?.mimetype || 'application/octet-stream'
-                    }, { quoted: m });
-                }
-                await m.React('✅');
-            } catch (error) {
-                console.error('Download Error:', error);
-                await m.reply('❌ Failed to download media.');
-            }
+            await this.handleViewDownload(m, sock);
             return;
         }
         
         if (normalizedId === 'btn_view_info_full') {
-            if (!m.viewData) {
-                await m.reply('❌ No media data found.');
-                return;
-            }
-            
-            const { type, quotedMsg, fileSize } = m.viewData;
-            let info = `📊 *Media Information*\n\n` +
-                       `Type: ${type}\n` +
-                       `Size: ${fileSize} MB\n`;
-            
-            if (type === 'image' && quotedMsg.imageMessage) {
-                info += `Dimensions: ${quotedMsg.imageMessage.width}x${quotedMsg.imageMessage.height}\n`;
-                info += `Caption: ${quotedMsg.imageMessage.caption || 'None'}\n`;
-            } else if (type === 'video' && quotedMsg.videoMessage) {
-                info += `Duration: ${quotedMsg.videoMessage.seconds}s\n`;
-                info += `Dimensions: ${quotedMsg.videoMessage.width}x${quotedMsg.videoMessage.height}\n`;
-                info += `Caption: ${quotedMsg.videoMessage.caption || 'None'}\n`;
-            } else if (type === 'audio' && quotedMsg.audioMessage) {
-                info += `Duration: ${quotedMsg.audioMessage.seconds}s\n`;
-                info += `PTT: ${quotedMsg.audioMessage.ptt ? 'Yes' : 'No'}\n`;
-            }
-            
-            info += `\nClick "Download" to save the media.`;
-            
-            await m.reply(info);
-            return;
-        }
-        
-        if (normalizedId === 'btn_view_help') {
-            const help = `👁️ *Media Viewer Help*\n\n` +
-                        `Usage:\n1. Reply to any media message\n2. Type .view\n3. Select an option\n\n` +
-                        `Features:\n• Download media\n• View media info\n• Extract media files`;
-            await m.reply(help);
+            await this.handleViewInfo(m, sock);
             return;
         }
         
         if (normalizedId === 'btn_view_cancel') {
             await m.reply('✅ Media viewer closed.');
-            delete m.viewData;
+            delete m.mediaData;
             return;
         }
         
@@ -1095,28 +589,24 @@ class BotRunner {
             return;
         }
         
-        if (normalizedId === 'btn_priv_messaging') {
-            await this.showPrivacyOptions(m, sock, 'disappear');
+        // ==================== OWNER BUTTONS ====================
+        if (normalizedId === 'btn_autoreact_on') {
+            await this.handleAutoReact(m, sock, true);
             return;
         }
         
-        if (normalizedId === 'btn_priv_account') {
-            await this.showPrivacyOptions(m, sock, 'profile');
+        if (normalizedId === 'btn_autoreact_off') {
+            await this.handleAutoReact(m, sock, false);
             return;
         }
         
-        if (normalizedId === 'btn_priv_bot') {
-            await m.reply('🤖 Bot controls - Owner only');
+        if (normalizedId === 'btn_mode_public') {
+            await this.handleBotMode(m, sock, 'public');
             return;
         }
         
-        if (normalizedId === 'btn_priv_advanced') {
-            await this.showPrivacyOptions(m, sock, 'status');
-            return;
-        }
-        
-        if (normalizedId === 'btn_priv_cancel' || normalizedId === 'btn_priv_done') {
-            await m.reply('✅ Privacy settings closed.');
+        if (normalizedId === 'btn_mode_private') {
+            await this.handleBotMode(m, sock, 'private');
             return;
         }
         
@@ -1124,116 +614,336 @@ class BotRunner {
         await m.reply(`❌ Button action "${buttonId}" not implemented yet.\n\nTry using commands instead:\n• .ping\n• .menu\n• .owner`);
     }
 
-    // ==================== HELPER FUNCTIONS ====================
-    async exportVCF(m, sock, type, data) {
-        try {
-            const { metadata, participants, admins } = data;
-            let exportParticipants = [];
-            let exportType = '';
-            
-            switch(type) {
-                case 'all':
-                    exportParticipants = participants || metadata.participants;
-                    exportType = 'All Contacts';
-                    break;
-                case 'admins':
-                    exportParticipants = admins || (participants ? participants.filter(p => p.admin) : metadata.participants.filter(p => p.admin));
-                    exportType = 'Administrators Only';
-                    break;
-                default:
-                    return m.reply('❌ Invalid export type.');
-            }
-            
-            if (exportParticipants.length === 0) {
-                return m.reply(`❌ No ${type === 'admins' ? 'administrators' : 'contacts'} found to export.`);
-            }
-            
-            await m.reply(`⏳ Creating VCF for ${exportParticipants.length} contacts...`);
-            
-            let vcfContent = '';
-            exportParticipants.forEach(participant => {
-                const phoneNumber = participant.id.split('@')[0];
-                const name = participant.name || participant.notify || `User_${phoneNumber}`;
-                const isAdmin = participant.admin ? ';ADMIN' : '';
-                
-                vcfContent += `BEGIN:VCARD\nVERSION:3.0\nN:${name};;;;\nFN:${name}${isAdmin}\nTEL;TYPE=CELL:+${phoneNumber}\nEND:VCARD\n\n`;
+    // ==================== BUTTON HANDLER METHODS ====================
+    
+    async handlePingButton(m, sock) {
+        const start = Date.now();
+        await m.reply(`🏓 Pong!`);
+        const latency = Date.now() - start;
+        const wsPing = sock.ws?.ping || 'N/A';
+        
+        const status = `⚡ *CLOUD AI Performance Report*\n\n` +
+                      `⏱️ Response Time: ${latency}ms\n` +
+                      `📡 WebSocket Ping: ${wsPing}ms\n` +
+                      `🆔 Session: ${this.sessionId}\n` +
+                      `📊 Status: ${latency < 500 ? 'Optimal ⚡' : 'Normal 📈'}`;
+        
+        await sock.sendMessage(m.from, { text: status }, { quoted: m });
+    }
+    
+    async handleStatusButton(m, sock) {
+        const uptime = this.getUptime();
+        const memoryUsage = (process.memoryUsage().heapUsed / 1024 / 1024).toFixed(2);
+        const os = require('os');
+        const totalMemory = (os.totalmem() / 1024 / 1024 / 1024).toFixed(2);
+        const freeMemory = (os.freemem() / 1024 / 1024 / 1024).toFixed(2);
+        
+        const status = `📊 *CLOUD AI System Status*\n\n` +
+                      `🆔 Session: ${this.sessionId}\n` +
+                      `🔌 State: ${this.connectionState}\n` +
+                      `⏱️ Uptime: ${uptime}\n` +
+                      `🔄 Reconnects: ${this.reconnectAttempts}/${this.maxReconnectAttempts}\n` +
+                      `📅 Last Activity: ${this.lastActivity.toLocaleTimeString()}\n` +
+                      `💾 Memory: ${memoryUsage} MB\n` +
+                      `💿 Total RAM: ${totalMemory} GB\n` +
+                      `📦 Free RAM: ${freeMemory} GB\n` +
+                      `🔌 Plugins: ${pluginLoader.plugins.size} loaded\n` +
+                      `🌐 Node.js: ${process.version}`;
+        
+        await sendButtons(sock, m.from, {
+            title: '📊 System Status',
+            text: status,
+            footer: 'Real-time system metrics',
+            buttons: [
+                { id: 'btn_ping', text: '🏓 Ping Test' },
+                { id: 'btn_plugins', text: '📦 Plugins' },
+                { id: 'btn_menu_back', text: '🔙 Back' }
+            ]
+        });
+    }
+    
+    async handlePluginsButton(m, sock) {
+        const plugins = Array.from(pluginLoader.plugins.keys());
+        const pluginList = plugins.length > 0 
+            ? plugins.map(p => `• .${p}`).join('\n')
+            : 'No plugins loaded';
+        await m.reply(`📦 *Loaded Plugins (${plugins.length})*\n\n${pluginList}`);
+    }
+    
+    async handleMenuButton(m, sock) {
+        const menuPlugin = pluginLoader.plugins.get('menu');
+        if (menuPlugin) {
+            m.body = '.menu';
+            await menuPlugin(m, sock);
+        } else {
+            await m.reply('❌ Menu plugin not found.');
+        }
+    }
+    
+    async handleOwnerButton(m, sock) {
+        const ownerPlugin = pluginLoader.plugins.get('owner');
+        if (ownerPlugin) {
+            m.body = '.owner';
+            await ownerPlugin(m, sock);
+        } else {
+            await m.reply('❌ Owner plugin not found.');
+        }
+    }
+    
+    async handleToolsMenu(m, sock) {
+        await sendButtons(sock, m.from, {
+            title: '🛠️ Tools Menu',
+            text: `*Available Tools:*\n\n• .ping - Check bot speed\n• .vcf - Export group contacts\n• .url - Upload media to cloud\n• .logo - Generate logos\n• .play - Download music\n• .view - Media viewer`,
+            footer: 'Select a tool or use command',
+            buttons: [
+                { id: 'btn_ping', text: '🏓 Ping' },
+                { id: 'btn_vcf', text: '📇 VCF Export' },
+                { id: 'btn_url', text: '🌐 URL Upload' },
+                { id: 'btn_logo_menu', text: '🎨 Logo Maker' },
+                { id: 'btn_play', text: '🎵 Music' },
+                { id: 'btn_view', text: '👁️ View Media' },
+                { id: 'btn_menu_back', text: '🔙 Back' }
+            ]
+        });
+    }
+    
+    async handleMediaMenu(m, sock) {
+        await sendButtons(sock, m.from, {
+            title: '📁 Media Menu',
+            text: `*Media Tools:*\n\n• .url - Upload files\n• .view - View/download media\n• .play - Music downloader\n• Image editing tools\n• Video tools\n• Audio tools`,
+            footer: 'Media processing tools',
+            buttons: [
+                { id: 'btn_url', text: '🌐 Upload' },
+                { id: 'btn_view', text: '👁️ View Media' },
+                { id: 'btn_play', text: '🎵 Music' },
+                { id: 'btn_menu_back', text: '🔙 Back' }
+            ]
+        });
+    }
+    
+    async handleGroupMenu(m, sock) {
+        if (!m.isGroup) {
+            await m.reply('❌ Group features only work in groups.');
+            return;
+        }
+        
+        await sendButtons(sock, m.from, {
+            title: '👥 Group Menu',
+            text: `*Group Management:*\n\n• .tagall - Tag all members\n• .vcf - Export contacts\n• Group info\n• Admin tools\n• Member management\n• Settings`,
+            footer: 'Group administration tools',
+            buttons: [
+                { id: 'btn_tagall', text: '🏷️ Tag All' },
+                { id: 'btn_vcf', text: '📇 Export Contacts' },
+                { id: 'btn_menu_back', text: '🔙 Back' }
+            ]
+        });
+    }
+    
+    async handleFunMenu(m, sock) {
+        await sendButtons(sock, m.from, {
+            title: '🎮 Fun Menu',
+            text: `*Fun & Games:*\n\n• .logo - Logo generator\n• Sticker maker\n• Games\n• AI chat\n• Entertainment\n• Random tools`,
+            footer: 'Entertainment features',
+            buttons: [
+                { id: 'btn_logo_menu', text: '🎨 Logo Maker' },
+                { id: 'btn_menu_back', text: '🔙 Back' }
+            ]
+        });
+    }
+    
+    async handleOwnerMenu(m, sock) {
+        const userId = m.sender.split('@')[0];
+        const ownerNumbers = ['254116763755', '254743982206'];
+        
+        if (!ownerNumbers.includes(userId)) {
+            await m.reply('🔒 *Owner Access Required*\nThis menu is restricted to BERA TECH.');
+            return;
+        }
+        
+        await sendButtons(sock, m.from, {
+            title: '👑 Owner Menu',
+            text: `*Owner Tools:*\n\n• .mode - Change bot mode\n• .autoreact - Auto reactions\n• .autotyping - Fake typing\n• .autorecording - Recording status\n• .privacy - Privacy settings\n• Bot controls`,
+            footer: 'Owner-only commands',
+            buttons: [
+                { id: 'btn_mode_info', text: '⚙️ Bot Mode' },
+                { id: 'btn_priv_visibility', text: '🔐 Privacy' },
+                { id: 'btn_autoreact', text: '💬 Auto React' },
+                { id: 'btn_autotyping', text: '⌨️ Auto Typing' },
+                { id: 'btn_menu_back', text: '🔙 Back' }
+            ]
+        });
+    }
+    
+    async handleBackButton(m, sock) {
+        const menuPlugin = pluginLoader.plugins.get('menu');
+        if (menuPlugin) {
+            m.body = '.menu';
+            await menuPlugin(m, sock);
+        } else {
+            await sendButtons(sock, m.from, {
+                title: '☁️ CLOUD AI Menu',
+                text: 'Main Menu - Select a category:',
+                footer: 'Powered by BERA TECH',
+                buttons: [
+                    { id: 'btn_menu_tools', text: '🛠️ Tools' },
+                    { id: 'btn_menu_media', text: '📁 Media' },
+                    { id: 'btn_menu_group', text: '👥 Group' },
+                    { id: 'btn_menu_fun', text: '🎮 Fun' },
+                    { id: 'btn_menu_owner', text: '👑 Owner' },
+                    { id: 'btn_system_status', text: '📊 Status' }
+                ]
             });
-            
-            const tempDir = path.join(__dirname, 'temp');
-            await fs.mkdir(tempDir, { recursive: true });
-            
-            const filename = `contacts_${metadata.subject.replace(/[^a-z0-9]/gi, '_')}_${type}_${Date.now()}.vcf`;
-            const filePath = path.join(tempDir, filename);
-            
-            await fs.writeFile(filePath, vcfContent, 'utf8');
-            
-            await sock.sendMessage(m.from, {
-                document: { url: filePath },
-                fileName: filename,
-                mimetype: 'text/vcard',
-                caption: `✅ *Contact Export Complete*\n\nGroup: ${metadata.subject}\nType: ${type}\nExported: ${exportParticipants.length} contacts\n\nPowered by CLOUD AI`
-            }, { quoted: m });
-            
-            setTimeout(() => {
-                fs.unlink(filePath).catch(() => {});
-            }, 30000);
-            
-        } catch (error) {
-            console.error('VCF Export Error:', error);
-            await m.reply('❌ Error creating VCF file.');
         }
     }
-
-    async tagMembers(m, sock, type, data) {
-        try {
-            const { metadata, participants, admins, regularMembers } = data;
-            let targetParticipants = [];
-            let tagType = '';
-            
-            switch(type) {
-                case 'all':
-                    targetParticipants = participants || metadata.participants;
-                    tagType = 'All Members';
-                    break;
-                case 'admins':
-                    targetParticipants = admins || (participants ? participants.filter(p => p.admin) : metadata.participants.filter(p => p.admin));
-                    tagType = 'Administrators';
-                    break;
-                case 'regular':
-                    targetParticipants = regularMembers || (participants ? participants.filter(p => !p.admin) : metadata.participants.filter(p => !p.admin));
-                    tagType = 'Regular Members';
-                    break;
-                default:
-                    return m.reply('❌ Invalid tag type.');
-            }
-            
-            if (targetParticipants.length === 0) {
-                return m.reply(`❌ No ${tagType.toLowerCase()} found to tag.`);
-            }
-            
-            await m.reply(`⏳ Tagging ${targetParticipants.length} members...`);
-            
-            const mentions = targetParticipants.map(p => p.id);
-            const tagMessage = `🔔 *${tagType.toUpperCase()} NOTIFICATION*\n\n` +
-                              `Message from: @${m.sender.split('@')[0]}\n` +
-                              `Group: ${metadata.subject}\n\n` +
-                              mentions.map(p => `@${p.split('@')[0]}`).join(' ') +
-                              `\n\n🏷️ Powered by CLOUD AI`;
-            
-            await sock.sendMessage(m.from, {
-                text: tagMessage,
-                mentions: mentions
-            }, { quoted: m });
-            
-        } catch (error) {
-            console.error('Tag Error:', error);
-            await m.reply('❌ Error tagging members.');
+    
+    async handleLogoMenu(m, sock) {
+        await sendButtons(sock, m.from, {
+            title: '🎨 Logo Generator',
+            text: `*Select logo category:*\n\nOr type directly:\n.logo [style] [text]\nExample: .logo glow CLOUD AI`,
+            footer: 'Choose a category or type manually',
+            buttons: [
+                { id: 'btn_logo_popular', text: '🎨 Popular' },
+                { id: 'btn_logo_water', text: '🌊 Water' },
+                { id: 'btn_logo_glow', text: '✨ Glow' },
+                { id: 'btn_logo_creative', text: '🎭 Creative' },
+                { id: 'btn_logo_backgrounds', text: '🌌 Backgrounds' },
+                { id: 'btn_logo_special', text: '🎉 Special' },
+                { id: 'btn_menu_back', text: '🔙 Back' }
+            ]
+        });
+    }
+    
+    async handleLogoCategory(m, sock, categoryId, styles) {
+        const categoryName = {
+            'btn_logo_popular': 'Popular',
+            'btn_logo_water': 'Water Effects',
+            'btn_logo_glow': 'Glow Effects',
+            'btn_logo_creative': 'Creative',
+            'btn_logo_backgrounds': 'Backgrounds',
+            'btn_logo_special': 'Special'
+        }[categoryId];
+        
+        let buttons = styles.map(style => ({
+            id: `btn_logo_select_${style}`,
+            text: style.charAt(0).toUpperCase() + style.slice(1)
+        }));
+        
+        // Add back button
+        buttons.push({ id: 'btn_logo_menu', text: '🔙 Back' });
+        
+        // Limit to 6 buttons (WhatsApp limit)
+        await sendButtons(sock, m.from, {
+            title: `🎨 ${categoryName} Logos`,
+            text: `*Select a style:*\n\nThen type:\n\`\`\`.logo [style] [your text]\`\`\`\n\nExample:\n.logo ${styles[0]} CLOUD AI`,
+            footer: 'Click style, then type command',
+            buttons: buttons.slice(0, 6)
+        });
+    }
+    
+    async handleVcfButton(m, sock) {
+        if (!m.isGroup) {
+            await m.reply('❌ VCF export only works in groups.');
+            return;
+        }
+        
+        const vcfPlugin = pluginLoader.plugins.get('vcf');
+        if (vcfPlugin) {
+            m.body = '.vcf';
+            await vcfPlugin(m, sock);
+        } else {
+            await m.reply('❌ VCF plugin not found.');
         }
     }
-
+    
+    async handleVcfExport(m, sock, type) {
+        if (!m.vcfData) {
+            await m.reply('❌ Please run .vcf command first.');
+            return;
+        }
+        
+        const vcfPlugin = pluginLoader.plugins.get('vcf');
+        if (vcfPlugin && vcfPlugin.exportVCF) {
+            await vcfPlugin.exportVCF(m, sock, type, m.vcfData);
+        } else {
+            await m.reply('❌ VCF export function not available.');
+        }
+    }
+    
+    async handleTagallButton(m, sock) {
+        if (!m.isGroup) {
+            await m.reply('❌ Tagall only works in groups.');
+            return;
+        }
+        
+        const tagallPlugin = pluginLoader.plugins.get('tagall');
+        if (tagallPlugin) {
+            m.body = '.tagall';
+            await tagallPlugin(m, sock);
+        } else {
+            await m.reply('❌ Tagall plugin not found.');
+        }
+    }
+    
+    async handleTagMembers(m, sock, type) {
+        if (!m.tagallData) {
+            await m.reply('❌ Please run .tagall command first.');
+            return;
+        }
+        
+        const tagallPlugin = pluginLoader.plugins.get('tagall');
+        if (tagallPlugin && tagallPlugin.tagMembers) {
+            await tagallPlugin.tagMembers(m, sock, type, m.tagallData);
+        } else {
+            await m.reply('❌ Tag function not available.');
+        }
+    }
+    
+    async handleTagCustom(m, sock) {
+        if (!m.tagallData) {
+            await m.reply('❌ Please run .tagall command first.');
+            return;
+        }
+        
+        await m.reply('✏️ Please type your custom message for tagging:');
+        this.userStates.set(m.sender, {
+            waitingFor: 'customTagMessage',
+            data: { participants: m.tagallData.participants }
+        });
+    }
+    
+    async handleUrlButton(m, sock) {
+        if (!m.quoted) {
+            await sendButtons(sock, m.from, {
+                title: '🌐 Media Upload',
+                text: `*How to use:*\n1. Reply to any media\n2. Click "Upload" button\n3. Select service\n\nOr type: .url`,
+                footer: 'Media hosting service',
+                buttons: [
+                    { id: 'btn_url_tutorial', text: '📚 Tutorial' },
+                    { id: 'btn_url_formats', text: '📋 Formats' },
+                    { id: 'btn_menu_back', text: '🔙 Back' }
+                ]
+            });
+            return;
+        }
+        
+        const urlPlugin = pluginLoader.plugins.get('url');
+        if (urlPlugin) {
+            m.body = '.url';
+            await urlPlugin(m, sock);
+        } else {
+            await m.reply('❌ URL plugin not found.');
+        }
+    }
+    
     async handleMediaUpload(m, sock, service) {
+        if (!m.uploadData) {
+            await m.reply('❌ Please reply to media first with .url');
+            return;
+        }
+        
+        const { quotedMsg } = m.uploadData;
+        
         try {
-            const { quotedMsg } = m.uploadData;
             await m.reply(`⚙️ Uploading to ${service === 'tmpfiles' ? 'TmpFiles.org' : 'Catbox.moe'}...`);
             
             const mediaBuffer = await downloadMediaMessage(quotedMsg, 'buffer', {});
@@ -1291,10 +1001,16 @@ class BotRunner {
             await m.reply(`❌ ${service} upload failed: ${error.message}`);
         }
     }
-
+    
     async analyzeMedia(m, sock) {
+        if (!m.uploadData) {
+            await m.reply('❌ Please reply to media first with .url');
+            return;
+        }
+        
+        const { quotedMsg } = m.uploadData;
+        
         try {
-            const { quotedMsg } = m.uploadData;
             await m.reply('📊 Analyzing media...');
             
             const mediaBuffer = await downloadMediaMessage(quotedMsg, 'buffer', {});
@@ -1303,26 +1019,26 @@ class BotRunner {
             let mediaType = 'Unknown';
             let dimensions = 'N/A';
             
-            if (quotedMsg.imageMessage) {
+            if (quotedMsg.message?.imageMessage) {
                 mediaType = 'Image';
-                dimensions = `${quotedMsg.imageMessage.width}x${quotedMsg.imageMessage.height}`;
-            } else if (quotedMsg.videoMessage) {
+                dimensions = `${quotedMsg.message.imageMessage.width}x${quotedMsg.message.imageMessage.height}`;
+            } else if (quotedMsg.message?.videoMessage) {
                 mediaType = 'Video';
-                dimensions = `${quotedMsg.videoMessage.width}x${quotedMsg.videoMessage.height}`;
-            } else if (quotedMsg.audioMessage) {
+                dimensions = `${quotedMsg.message.videoMessage.width}x${quotedMsg.message.videoMessage.height}`;
+            } else if (quotedMsg.message?.audioMessage) {
                 mediaType = 'Audio';
-                dimensions = `${quotedMsg.audioMessage.seconds}s`;
-            } else if (quotedMsg.documentMessage) {
+                dimensions = `${quotedMsg.message.audioMessage.seconds}s`;
+            } else if (quotedMsg.message?.documentMessage) {
                 mediaType = 'Document';
-                dimensions = quotedMsg.documentMessage.fileName || 'Unknown';
+                dimensions = quotedMsg.message.documentMessage.fileName || 'Unknown';
             }
             
             const analysis = `📊 *Media Analysis*\n\n` +
                             `📁 Type: ${mediaType}\n` +
                             `📏 Size: ${fileSizeMB} MB\n` +
                             `📐 Dimensions: ${dimensions}\n` +
-                            `🎯 Format: ${quotedMsg[`${mediaType.toLowerCase()}Message`]?.mimetype || 'Unknown'}\n` +
-                            `📝 Caption: ${quotedMsg[`${mediaType.toLowerCase()}Message`]?.caption || 'None'}\n\n` +
+                            `🎯 Format: ${quotedMsg.message?.[`${mediaType.toLowerCase()}Message`]?.mimetype || 'Unknown'}\n` +
+                            `📝 Caption: ${quotedMsg.message?.[`${mediaType.toLowerCase()}Message`]?.caption || 'None'}\n\n` +
                             `Ready for upload!`;
             
             await sock.sendMessage(m.from, { text: analysis }, { quoted: m });
@@ -1332,31 +1048,120 @@ class BotRunner {
             await m.reply('❌ Failed to analyze media.');
         }
     }
-
+    
+    async handlePlayButton(m, sock) {
+        const playPlugin = pluginLoader.plugins.get('play');
+        if (playPlugin) {
+            m.body = '.play';
+            await playPlugin(m, sock);
+        } else {
+            await m.reply('❌ Music player plugin not found.');
+        }
+    }
+    
+    async handleMusicDownload(m, sock, videoId, quality) {
+        const playPlugin = pluginLoader.plugins.get('play');
+        if (playPlugin && playPlugin.downloadAndSendAudio) {
+            await playPlugin.downloadAndSendAudio(m, sock, videoId, quality);
+        } else {
+            await m.reply('❌ Music download function not available.');
+        }
+    }
+    
+    async handleMusicInfo(m, sock, videoId) {
+        const playPlugin = pluginLoader.plugins.get('play');
+        if (playPlugin && playPlugin.getVideoInfo) {
+            await playPlugin.getVideoInfo(m, sock, videoId);
+        } else {
+            await m.reply('❌ Video info function not available.');
+        }
+    }
+    
+    async handleViewButton(m, sock) {
+        const viewPlugin = pluginLoader.plugins.get('view');
+        if (viewPlugin) {
+            m.body = '.view';
+            await viewPlugin(m, sock);
+        } else {
+            await m.reply('❌ View plugin not found.');
+        }
+    }
+    
+    async handleViewDownload(m, sock) {
+        if (!m.mediaData) {
+            await m.reply('❌ No media data found.');
+            return;
+        }
+        
+        const { buffer, type, fileSize } = m.mediaData;
+        
+        try {
+            if (type === 'image') {
+                await sock.sendMessage(m.from, {
+                    image: buffer,
+                    caption: `📷 Downloaded via CLOUD AI\nSize: ${fileSize} MB`
+                }, { quoted: m });
+            } else if (type === 'video') {
+                await sock.sendMessage(m.from, {
+                    video: buffer,
+                    caption: `🎥 Downloaded via CLOUD AI\nSize: ${fileSize} MB`
+                }, { quoted: m });
+            } else if (type === 'audio') {
+                await sock.sendMessage(m.from, {
+                    audio: buffer,
+                    mimetype: 'audio/mp4',
+                    ptt: false
+                }, { quoted: m });
+            }
+            await m.React('✅');
+        } catch (error) {
+            console.error('Download Error:', error);
+            await m.reply('❌ Failed to download media.');
+        }
+    }
+    
+    async handleViewInfo(m, sock) {
+        if (!m.mediaData) {
+            await m.reply('❌ No media data found.');
+            return;
+        }
+        
+        const { type, quotedMsg, fileSize } = m.mediaData;
+        let info = `📊 *Media Information*\n\n` +
+                   `Type: ${type}\n` +
+                   `Size: ${fileSize} MB\n`;
+        
+        if (type === 'image' && quotedMsg.message?.imageMessage) {
+            info += `Dimensions: ${quotedMsg.message.imageMessage.width}x${quotedMsg.message.imageMessage.height}\n`;
+            info += `Caption: ${quotedMsg.message.imageMessage.caption || 'None'}\n`;
+        } else if (type === 'video' && quotedMsg.message?.videoMessage) {
+            info += `Duration: ${quotedMsg.message.videoMessage.seconds}s\n`;
+            info += `Dimensions: ${quotedMsg.message.videoMessage.width}x${quotedMsg.message.videoMessage.height}\n`;
+            info += `Caption: ${quotedMsg.message.videoMessage.caption || 'None'}\n`;
+        }
+        
+        await m.reply(info);
+    }
+    
     async showPrivacyOptions(m, sock, settingType) {
+        const userId = m.sender.split('@')[0];
+        const ownerNumbers = ['254116763755', '254743982206'];
+        
+        if (!ownerNumbers.includes(userId)) {
+            await m.reply('🔒 Owner access required.');
+            return;
+        }
+        
         const options = {
             lastseen: ['all', 'contacts', 'none'],
             profile: ['all', 'contacts', 'none'],
-            status: ['all', 'contacts', 'none'],
-            groupadd: ['all', 'contacts', 'none'],
-            disappear: ['0', '86400', '604800']
+            status: ['all', 'contacts', 'none']
         };
         
         const labels = {
             all: '👁️ Everyone',
             contacts: '📱 Contacts',
-            none: '🙈 Nobody',
-            '0': '❌ Off',
-            '86400': '⏰ 24 Hours',
-            '604800': '📅 7 Days'
-        };
-        
-        const settingLabels = {
-            lastseen: 'Last Seen',
-            profile: 'Profile Photo',
-            status: 'Status',
-            groupadd: 'Group Add',
-            disappear: 'Disappearing Messages'
+            none: '🙈 Nobody'
         };
         
         const buttons = options[settingType].map(value => ({
@@ -1364,52 +1169,44 @@ class BotRunner {
             text: labels[value] || value
         }));
         
-        buttons.push({ id: 'btn_priv_cancel', text: '❌ Cancel' });
+        buttons.push({ id: 'btn_menu_owner', text: '🔙 Back' });
         
         await sendButtons(sock, m.from, {
-            title: `🔐 ${settingLabels[settingType]} Privacy`,
+            title: `🔐 ${settingType.charAt(0).toUpperCase() + settingType.slice(1)} Privacy`,
             text: 'Select privacy level:',
             footer: 'CLOUD AI Privacy Manager',
             buttons: buttons
         });
     }
-
-    async applyPrivacySetting(m, sock, settingType, value) {
-        try {
-            await m.reply(`⚙️ Updating ${settingType} privacy...`);
-            
-            // Note: Actual privacy API might need adjustment based on Baileys version
-            if (settingType === 'disappear') {
-                await sock.updateDisappearingMode(parseInt(value));
-            } else {
-                await sock.updatePrivacySettings(settingType, value);
-            }
-            
-            const readableValue = {
-                'all': 'Everyone',
-                'contacts': 'Contacts',
-                'none': 'Nobody',
-                '0': 'Off',
-                '86400': '24 Hours',
-                '604800': '7 Days'
-            }[value] || value;
-            
-            await sendButtons(sock, m.from, {
-                title: '✅ Privacy Updated',
-                text: `Setting: ${settingType}\nValue: ${readableValue}`,
-                footer: 'Changes applied successfully',
-                buttons: [
-                    { id: 'btn_priv_more', text: '⚙️ More Settings' },
-                    { id: 'btn_priv_done', text: '✅ Done' }
-                ]
-            });
-            
-        } catch (error) {
-            console.error('Privacy Update Error:', error);
-            await m.reply(`❌ Failed to update ${settingType} privacy.`);
+    
+    async handleAutoReact(m, sock, enabled) {
+        const userId = m.sender.split('@')[0];
+        const ownerNumbers = ['254116763755', '254743982206'];
+        
+        if (!ownerNumbers.includes(userId)) {
+            await m.reply('🔒 Owner access required.');
+            return;
         }
+        
+        process.env.AUTO_REACT = enabled ? 'true' : 'false';
+        await m.reply(`✅ Auto-reaction ${enabled ? 'turned ON' : 'turned OFF'}`);
+    }
+    
+    async handleBotMode(m, sock, mode) {
+        const userId = m.sender.split('@')[0];
+        const ownerNumbers = ['254116763755', '254743982206'];
+        
+        if (!ownerNumbers.includes(userId)) {
+            await m.reply('🔒 Owner access required.');
+            return;
+        }
+        
+        process.env.BOT_MODE = mode;
+        await m.reply(`✅ Bot mode set to: ${mode.toUpperCase()}`);
     }
 
+    // ==================== HELPER FUNCTIONS ====================
+    
     async handleBuiltinCommand(m, sock, cmd, args) {
         switch(cmd) {
             case 'ping':
@@ -1475,6 +1272,17 @@ class BotRunner {
         
         m.pushName = m.pushName || 'User';
         
+        // ========== VIEW-ONCE MESSAGE HANDLING ==========
+        if (m.message?.viewOnceMessageV2?.message) {
+            m.message = m.message.viewOnceMessageV2.message;
+            m.isViewOnce = true;
+        } else if (m.message?.viewOnceMessage?.message) {
+            m.message = m.message.viewOnceMessage.message;
+            m.isViewOnce = true;
+        }
+        // ========== END VIEW-ONCE HANDLING ==========
+        
+        // Add reply method
         m.reply = (text, options = {}) => {
             return new Promise((resolve) => {
                 setTimeout(async () => {
@@ -1489,6 +1297,7 @@ class BotRunner {
             });
         };
         
+        // Add react method
         m.React = (emoji) => {
             return sock.sendMessage(m.from, {
                 react: { text: emoji, key: m.key }
@@ -1567,6 +1376,7 @@ class BotRunner {
         }
         
         this.userStates.clear();
+        this.activeUploads.clear();
         
         console.log(`🛑 CLOUD AI bot stopped: ${this.sessionId}`);
     }
@@ -1601,6 +1411,7 @@ function getActiveBots() {
     return global.activeBots || {};
 }
 
+// Initialize global active bots registry
 global.activeBots = {};
 
 module.exports = {
