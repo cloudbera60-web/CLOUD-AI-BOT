@@ -10,6 +10,7 @@
     "@octokit/rest": "^20.0.2",
    "@whiskeysockets/baileys": "npm:baileys@6.7.21", 
     "gifted-btns": "^1.0.0", 
+     "cors": "^2.8.5",
     "adm-zip": "^0.5.16",
     "@xaviabot/fb-downloader": "^1.0.14",
     "acrcloud": "^1.4.0",
